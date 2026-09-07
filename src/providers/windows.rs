@@ -1,5 +1,5 @@
 use super::{command_output, run_shell, Provider};
-use crate::{fuzzy, types::Item};
+use crate::{fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
 use anyhow::Result;
 use serde::Deserialize;
 
@@ -51,6 +51,21 @@ impl Provider for WindowsProvider {
             "niri" => run_shell(&format!("niri msg action focus-window --id {id}")),
             "wmctrl" => run_shell(&format!("wmctrl -ia {id}")),
             _ => Ok(()),
+        }
+    }
+
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability {
+            name: self.name().into(),
+            name_pretty: self.pretty_name().into(),
+            description: "Search and focus open windows".into(),
+            prefixes: Vec::new(),
+            actions: action_map(&[("focus", ActionCapability::new("Focus"))]),
+            supports_query: true,
+            supports_activate: true,
+            supports_streaming: true,
+            supports_subscriptions: false,
+            emits_events: false,
         }
     }
 }

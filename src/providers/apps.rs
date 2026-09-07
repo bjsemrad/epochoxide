@@ -1,5 +1,5 @@
 use super::{run_shell, Provider};
-use crate::{config::Config, fuzzy, types::Item};
+use crate::{config::Config, fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::{Path, PathBuf}};
@@ -98,7 +98,7 @@ impl Provider for AppsProvider {
                 }
             }
         }
-        items.sort_by(|a, b| b.score.cmp(&a.score));
+        items.sort_by_key(|item| std::cmp::Reverse(item.score));
         items.truncate(limit);
         items
     }
@@ -110,6 +110,21 @@ impl Provider for AppsProvider {
         let exec = desktop_action.and_then(|a| app.actions.get(a)).unwrap_or(&app.exec);
         let command = if self.config.launch_prefix.is_empty() { exec.clone() } else { format!("{} {}", self.config.launch_prefix, exec) };
         run_shell(&command)
+    }
+
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability {
+            name: self.name().into(),
+            name_pretty: self.pretty_name().into(),
+            description: "Search and launch desktop applications".into(),
+            prefixes: Vec::new(),
+            actions: action_map(&[("open", ActionCapability::new("Open"))]),
+            supports_query: true,
+            supports_activate: true,
+            supports_streaming: true,
+            supports_subscriptions: false,
+            emits_events: false,
+        }
     }
 }
 

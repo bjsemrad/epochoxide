@@ -8,6 +8,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 
 - Desktop application search from XDG `.desktop` files.
 - File search from configured roots with file previews and open/copy actions.
+- Command runner from `$PATH` and custom configured commands.
 - Clipboard history for text and images.
 - Optional OCR for image clipboard entries through `tesseract`.
 - Clipboard edit actions for text and image clips.
@@ -15,6 +16,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - Calculator results through `qalc` when available, with local arithmetic fallback.
 - Custom TOML menus.
 - User systemd service for warm, low-latency queries.
+- Persistent usage history and recency-aware ranking.
 - Nix flake package, Home Manager module, and NixOS module.
 - JSON-over-Unix-socket protocol for easy shell integration.
 
@@ -70,7 +72,7 @@ systemctl --user status epochoxide.service
 Query through the warm daemon:
 
 ```bash
-epochoxide query --providers apps,files,clipboard,windows,calc,menus --query fire --limit 20
+epochoxide query --providers apps,files,runner,clipboard,windows,calc,menus --query fire --limit 20
 ```
 
 ## Socket Location
@@ -107,6 +109,12 @@ Query files:
 
 ```bash
 epochoxide query --providers files --query README --limit 10
+```
+
+Query commands:
+
+```bash
+epochoxide query --providers runner --query rg --limit 10
 ```
 
 Query clipboard:
@@ -164,7 +172,7 @@ epochoxide query --providers apps --query browser --limit 10
 
 ### Files
 
-The `files` provider indexes configured directories and returns file items with preview metadata.
+The `files` provider indexes configured directories and returns file items with preview metadata. In daemon mode it watches configured roots and applies filesystem changes incrementally before queries. On Linux this uses inotify through the `notify` backend.
 
 Actions:
 
@@ -176,6 +184,19 @@ Actions:
 
 ```bash
 epochoxide query --providers files --query invoice --limit 20
+```
+
+### Runner
+
+The `runner` provider indexes executable commands from `$PATH` and optional custom commands from config.
+
+Actions:
+
+- `run`
+- `reindex`
+
+```bash
+epochoxide query --providers runner --query firefox --limit 10
 ```
 
 ### Clipboard
@@ -244,8 +265,8 @@ Example:
 
 ```toml
 socket = "/run/user/1000/epochoxide.sock"
-file_roots = ["~/Documents", "~/Downloads"]
-ignored_dirs = ["~/.cache", ".git", "node_modules", "target"]
+file_roots = ["~"]
+ignored_dirs = ["~/.cache", "~/.local/share/Trash", "~/.cargo/registry", "~/.rustup", "~/.npm", "~/.pnpm-store", "~/.var/app", ".git", "node_modules", "target", "dist", "build", ".direnv"]
 menus_dir = "~/.config/epochoxide/menus"
 launch_prefix = ""
 terminal_cmd = ""
@@ -255,6 +276,14 @@ clipboard_text_editor = "xdg-open"
 clipboard_image_editor = ""
 clipboard_ocr = false
 clipboard_capture_interval_ms = 250
+runner_scan_path = true
+
+[[runner_commands]]
+name = "Edit Config"
+command = "xdg-open ~/.config/epochoxide/config.toml"
+keywords = ["epochoxide", "settings"]
+icon = "preferences-system"
+terminal = false
 ```
 
 See `config.example.toml` for a starter file.
@@ -322,6 +351,8 @@ Response shape:
 {"ok":true,"data":[],"error":null}
 ```
 
+Items carry `actions: ["open", ...]` — the action *names* available on that specific item — but not the full `ActionCapability` metadata (label, `destructive`, `needs_args`, etc.) for each one. Fetch the `providers` capability list once per session and join on `item.provider` + action name to get that metadata, rather than expecting it duplicated on every item.
+
 For the lowest latency shell integration, keep a persistent socket connection open while the launcher is visible and send a new query request for each input change.
 
 ## Nix
@@ -356,7 +387,6 @@ nix run . -- query --providers apps --query firefox --limit 10
             enable = true;
             enableService = true;
             settings = {
-              file_roots = [ "~/Documents" "~/Downloads" ];
               clipboard_ocr = true;
               clipboard_text_editor = "xdg-open";
             };
@@ -379,7 +409,12 @@ nix run . -- query --providers apps --query firefox --limit 10
       system = "x86_64-linux";
       modules = [
         epochoxide.nixosModules.default
-        { services.epochoxide.enable = true; }
+        {
+          services.epochoxide = {
+            enable = true;
+            settings.clipboard_ocr = true;
+          };
+        }
       ];
     };
   };
@@ -394,6 +429,32 @@ The Nix modules run EpochOxide as a systemd user service with:
 
 In a user systemd unit, `%t` expands to the user runtime directory.
 
+The Home Manager module writes practical defaults automatically:
+
+```nix
+settings = {
+  file_roots = [ "~" ];
+  ignored_dirs = [
+    "~/.cache"
+    "~/.local/share/Trash"
+    "~/.cargo/registry"
+    "~/.rustup"
+    "~/.npm"
+    "~/.pnpm-store"
+    "~/.var/app"
+    ".git"
+    "node_modules"
+    "target"
+    "dist"
+    "build"
+    ".direnv"
+  ];
+  runner_scan_path = true;
+};
+```
+
+You only need to set `file_roots` or `ignored_dirs` if you want to override these defaults.
+
 ## Shell Integration
 
 There are two integration modes.
@@ -401,7 +462,7 @@ There are two integration modes.
 CLI mode is easiest:
 
 ```bash
-epochoxide query --providers apps,files,clipboard --query "$QUERY" --limit 20
+epochoxide query --providers apps,files,runner,clipboard --query "$QUERY" --limit 20
 ```
 
 Direct socket mode is fastest:
@@ -435,13 +496,14 @@ Current optimizations:
 
 - Long-lived systemd user daemon.
 - CLI automatically uses the daemon socket when available.
-- Precomputed searchable strings for apps and files.
+- Precomputed searchable strings for apps, files, and commands.
+- Persistent usage history and recency boosts across providers.
+- Filesystem watcher support for warm incremental file index updates.
 - Clipboard capture throttling to avoid shelling out on every keystroke.
 - Persistent socket support for very low-latency frontend integration.
 
 Future performance work:
 
-- Incremental file indexing through `inotify`.
 - Persistent on-disk indexes through `redb` or `sled`.
 - Cached compositor window state from event streams.
 - Streaming query responses.

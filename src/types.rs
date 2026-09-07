@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ItemType {
@@ -28,6 +29,42 @@ pub struct Item {
     pub preview_type: String,
     pub state: Vec<String>,
     pub actions: Vec<String>,
+    pub icon_path: Option<String>,
+    pub thumbnail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionCapability {
+    pub label: String,
+    pub needs_args: bool,
+    pub destructive: bool,
+    pub async_action: bool,
+    pub terminal: bool,
+    pub confirmation: bool,
+}
+
+impl ActionCapability {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self { label: label.into(), needs_args: false, destructive: false, async_action: false, terminal: false, confirmation: false }
+    }
+
+    pub fn destructive(mut self) -> Self { self.destructive = true; self.confirmation = true; self }
+    pub fn needs_args(mut self) -> Self { self.needs_args = true; self }
+    pub fn async_action(mut self) -> Self { self.async_action = true; self }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderCapability {
+    pub name: String,
+    pub name_pretty: String,
+    pub description: String,
+    pub prefixes: Vec<String>,
+    pub actions: HashMap<String, ActionCapability>,
+    pub supports_query: bool,
+    pub supports_activate: bool,
+    pub supports_streaming: bool,
+    pub supports_subscriptions: bool,
+    pub emits_events: bool,
 }
 
 impl Item {
@@ -46,6 +83,12 @@ impl Item {
             preview_type: String::new(),
             state: Vec::new(),
             actions: Vec::new(),
+            icon_path: None,
+            thumbnail: None,
         }
     }
+}
+
+pub fn action_map(actions: &[(&str, ActionCapability)]) -> HashMap<String, ActionCapability> {
+    actions.iter().map(|(name, cap)| ((*name).to_string(), cap.clone())).collect()
 }

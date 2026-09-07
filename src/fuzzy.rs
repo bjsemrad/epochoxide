@@ -1,5 +1,9 @@
 use crate::types::FuzzyInfo;
 
+pub fn mask(s: &str) -> u64 {
+    s.bytes().fold(0u64, |m, b| m | (1u64 << (b as u64 % 64)))
+}
+
 pub fn score(query: &str, candidate: &str, exact: bool, field: &str) -> Option<(i32, FuzzyInfo)> {
     if query.is_empty() {
         return Some((1, FuzzyInfo { start: 0, field: field.to_string(), positions: Vec::new() }));
@@ -37,7 +41,14 @@ pub fn score(query: &str, candidate: &str, exact: bool, field: &str) -> Option<(
 
 #[cfg(test)]
 mod tests {
-    use super::score;
+    use super::{mask, score};
+
+    #[test]
+    fn mask_is_necessary_condition_for_match() {
+        let m = mask("firefox");
+        assert_eq!(mask("fox") & m, mask("fox"));
+        assert_ne!(mask("zzz") & m, mask("zzz"));
+    }
 
     #[test]
     fn fuzzy_matches_in_order() {

@@ -1,6 +1,6 @@
 socket = "/run/user/1000/epochoxide.sock"
-file_roots = ["~/Documents", "~/Downloads"]
-ignored_dirs = ["~/.cache", ".git", "node_modules", "target"]
+file_roots = ["~"]
+ignored_dirs = ["~/.cache", "~/.local/share/Trash", "~/.cargo/registry", "~/.rustup", "~/.npm", "~/.pnpm-store", "~/.var/app", ".git", "node_modules", "target", "dist", "build", ".direnv"]
 menus_dir = "~/.config/epochoxide/menus"
 launch_prefix = ""
 terminal_cmd = ""
@@ -10,3 +10,40 @@ clipboard_text_editor = "xdg-open"
 clipboard_image_editor = ""
 clipboard_ocr = false
 clipboard_capture_interval_ms = 250
+runner_scan_path = true
+
+[provider_enabled]
+apps = true
+files = true
+runner = true
+clipboard = true
+windows = true
+calc = true
+menus = true
+
+[provider_weights]
+apps = 20000
+runner = 12000
+calc = 10000
+windows = 6000
+menus = 2000
+files = 0
+clipboard = 0
+
+[query_prefixes]
+">" = "runner"
+"/" = "files"
+"#" = "clipboard"
+"@" = "windows"
+":" = "menus"
+"?" = "calc"
+
+icon_theme = ""
+thumbnail_cache_enabled = true
+
+[[runner_commands]]
+name = "Edit Config"
+command = "xdg-open ~/.config/epochoxide/config.toml"
+keywords = ["epochoxide", "settings"]
+icon = "preferences-system"
+terminal = false

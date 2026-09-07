@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::{Path, PathBuf}};
+use std::{collections::HashMap, fs, path::{Path, PathBuf}};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -16,6 +16,24 @@ pub struct Config {
     pub clipboard_image_editor: String,
     pub clipboard_ocr: bool,
     pub clipboard_capture_interval_ms: u64,
+    pub runner_scan_path: bool,
+    pub runner_commands: Vec<RunnerCommand>,
+    pub provider_enabled: HashMap<String, bool>,
+    pub provider_weights: HashMap<String, i32>,
+    pub query_prefixes: HashMap<String, String>,
+    pub icon_theme: String,
+    pub icon_cache_dir: String,
+    pub thumbnail_cache_enabled: bool,
+    pub persistent_index: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunnerCommand {
+    pub name: String,
+    pub command: String,
+    pub keywords: Vec<String>,
+    pub icon: Option<String>,
+    pub terminal: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -32,6 +50,15 @@ struct PartialConfig {
     clipboard_image_editor: Option<String>,
     clipboard_ocr: Option<bool>,
     clipboard_capture_interval_ms: Option<u64>,
+    runner_scan_path: Option<bool>,
+    runner_commands: Option<Vec<RunnerCommand>>,
+    provider_enabled: Option<HashMap<String, bool>>,
+    provider_weights: Option<HashMap<String, i32>>,
+    query_prefixes: Option<HashMap<String, String>>,
+    icon_theme: Option<String>,
+    icon_cache_dir: Option<String>,
+    thumbnail_cache_enabled: Option<bool>,
+    persistent_index: Option<bool>,
 }
 
 impl Default for Config {
@@ -39,8 +66,8 @@ impl Default for Config {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         Self {
             socket: default_socket(),
-            file_roots: vec![home.join("Documents").display().to_string(), home.join("Downloads").display().to_string()],
-            ignored_dirs: vec![home.join(".cache").display().to_string(), ".git".to_string()],
+            file_roots: vec![home.display().to_string()],
+            ignored_dirs: default_ignored_dirs(&home),
             menus_dir: home.join(".config/epochoxide/menus").display().to_string(),
             launch_prefix: String::new(),
             terminal_cmd: String::new(),
@@ -50,6 +77,15 @@ impl Default for Config {
             clipboard_image_editor: String::new(),
             clipboard_ocr: false,
             clipboard_capture_interval_ms: 250,
+            runner_scan_path: true,
+            runner_commands: Vec::new(),
+            provider_enabled: default_provider_enabled(),
+            provider_weights: default_provider_weights(),
+            query_prefixes: default_query_prefixes(),
+            icon_theme: String::new(),
+            icon_cache_dir: dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("epochoxide/icons").display().to_string(),
+            thumbnail_cache_enabled: true,
+            persistent_index: true,
         }
     }
 }
@@ -77,6 +113,15 @@ impl Config {
         if let Some(v) = partial.clipboard_image_editor { cfg.clipboard_image_editor = v; }
         if let Some(v) = partial.clipboard_ocr { cfg.clipboard_ocr = v; }
         if let Some(v) = partial.clipboard_capture_interval_ms { cfg.clipboard_capture_interval_ms = v; }
+        if let Some(v) = partial.runner_scan_path { cfg.runner_scan_path = v; }
+        if let Some(v) = partial.runner_commands { cfg.runner_commands = v; }
+        if let Some(v) = partial.provider_enabled { cfg.provider_enabled.extend(v); }
+        if let Some(v) = partial.provider_weights { cfg.provider_weights.extend(v); }
+        if let Some(v) = partial.query_prefixes { cfg.query_prefixes.extend(v); }
+        if let Some(v) = partial.icon_theme { cfg.icon_theme = v; }
+        if let Some(v) = partial.icon_cache_dir { cfg.icon_cache_dir = v; }
+        if let Some(v) = partial.thumbnail_cache_enabled { cfg.thumbnail_cache_enabled = v; }
+        if let Some(v) = partial.persistent_index { cfg.persistent_index = v; }
         cfg.expand_paths();
         Ok(cfg)
     }
@@ -86,6 +131,7 @@ impl Config {
         self.ignored_dirs = self.ignored_dirs.iter().map(|p| expand(p)).collect();
         self.menus_dir = expand(&self.menus_dir);
         self.clipboard_image_dir = expand(&self.clipboard_image_dir);
+        self.icon_cache_dir = expand(&self.icon_cache_dir);
     }
 }
 
@@ -101,4 +147,36 @@ fn default_socket() -> String {
     std::env::var("XDG_RUNTIME_DIR")
         .map(|dir| PathBuf::from(dir).join("epochoxide.sock").display().to_string())
         .unwrap_or_else(|_| "/tmp/epochoxide.sock".to_string())
+}
+
+fn default_ignored_dirs(home: &Path) -> Vec<String> {
+    [
+        home.join(".cache").display().to_string(),
+        home.join(".local/share/Trash").display().to_string(),
+        home.join(".cargo/registry").display().to_string(),
+        home.join(".rustup").display().to_string(),
+        home.join(".npm").display().to_string(),
+        home.join(".pnpm-store").display().to_string(),
+        home.join(".var/app").display().to_string(),
+        ".git".to_string(),
+        "node_modules".to_string(),
+        "target".to_string(),
+        "dist".to_string(),
+        "build".to_string(),
+        ".direnv".to_string(),
+    ].into()
+}
+
+fn default_provider_enabled() -> HashMap<String, bool> {
+    ["apps", "files", "runner", "clipboard", "windows", "calc", "menus"].into_iter().map(|p| (p.to_string(), true)).collect()
+}
+
+fn default_provider_weights() -> HashMap<String, i32> {
+    [("apps", 20_000), ("runner", 12_000), ("calc", 10_000), ("windows", 6_000), ("files", 0), ("clipboard", 0), ("menus", 2_000)]
+        .into_iter().map(|(p, w)| (p.to_string(), w)).collect()
+}
+
+fn default_query_prefixes() -> HashMap<String, String> {
+    [(">", "runner"), ("/", "files"), ("#", "clipboard"), ("@", "windows"), (":", "menus"), ("?", "calc")]
+        .into_iter().map(|(prefix, provider)| (prefix.to_string(), provider.to_string())).collect()
 }

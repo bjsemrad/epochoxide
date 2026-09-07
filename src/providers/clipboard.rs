@@ -1,5 +1,5 @@
 use super::{run_shell, Provider};
-use crate::{config::Config, fuzzy, types::Item};
+use crate::{config::Config, fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::{Path, PathBuf}, process::{Command, Stdio}, time::{Duration, Instant}};
@@ -128,7 +128,7 @@ impl Provider for ClipboardProvider {
                 out.push(item);
             }
         }
-        out.sort_by(|a, b| b.score.cmp(&a.score));
+        out.sort_by_key(|item| std::cmp::Reverse(item.score));
         out.truncate(limit);
         out
     }
@@ -154,6 +154,29 @@ impl Provider for ClipboardProvider {
             "pin" => { if let Some(c) = self.items.iter_mut().find(|i| i.id == identifier) { c.pinned = true; } self.compact() }
             "unpin" => { if let Some(c) = self.items.iter_mut().find(|i| i.id == identifier) { c.pinned = false; } self.compact() }
             _ => anyhow::bail!("unsupported clipboard action: {action}"),
+        }
+    }
+
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability {
+            name: self.name().into(),
+            name_pretty: self.pretty_name().into(),
+            description: "Search text/image clipboard history with optional OCR".into(),
+            prefixes: Vec::new(),
+            actions: action_map(&[
+                ("copy", ActionCapability::new("Copy")),
+                ("edit", ActionCapability::new("Edit").async_action()),
+                ("ocr", ActionCapability::new("OCR").async_action()),
+                ("pin", ActionCapability::new("Pin")),
+                ("unpin", ActionCapability::new("Unpin")),
+                ("remove", ActionCapability::new("Remove").destructive()),
+                ("remove_all", ActionCapability::new("Remove All").destructive()),
+            ]),
+            supports_query: true,
+            supports_activate: true,
+            supports_streaming: true,
+            supports_subscriptions: false,
+            emits_events: false,
         }
     }
 }

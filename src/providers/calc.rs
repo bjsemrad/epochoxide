@@ -1,5 +1,5 @@
 use super::{command_output, run_shell, Provider};
-use crate::{config::Config, fuzzy, types::Item};
+use crate::{config::Config, fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
 use anyhow::Result;
 
 pub struct CalcProvider { history: Vec<(String, String)> }
@@ -45,13 +45,32 @@ impl Provider for CalcProvider {
             _ => anyhow::bail!("unsupported calc action: {action}"),
         }
     }
+
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability {
+            name: self.name().into(),
+            name_pretty: self.pretty_name().into(),
+            description: "Evaluate calculations and copy/save results".into(),
+            prefixes: Vec::new(),
+            actions: action_map(&[
+                ("copy", ActionCapability::new("Copy")),
+                ("save", ActionCapability::new("Save")),
+                ("delete", ActionCapability::new("Delete").destructive()),
+            ]),
+            supports_query: true,
+            supports_activate: true,
+            supports_streaming: true,
+            supports_subscriptions: false,
+            emits_events: false,
+        }
+    }
 }
 
 fn calculate(query: &str) -> Option<String> {
     let q = query.trim();
     if q.len() < 2 || !q.chars().any(|c| c.is_ascii_digit()) { return None; }
     if let Some(out) = command_output("qalc", &["-t", q]) { if !out.is_empty() { return Some(out); } }
-    meval::eval_str(q).ok().map(|v| trim_float(v))
+    meval::eval_str(q).ok().map(trim_float)
 }
 
 fn trim_float(v: f64) -> String {

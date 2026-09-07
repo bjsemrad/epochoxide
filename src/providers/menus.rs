@@ -1,5 +1,5 @@
 use super::{run_shell, Provider};
-use crate::{config::{expand, Config}, fuzzy, types::Item};
+use crate::{config::{expand, Config}, fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{collections::HashMap, fs, path::Path};
@@ -102,6 +102,24 @@ impl Provider for MenusProvider {
         let value = entry.value.as_deref().unwrap_or(&entry.text);
         command = command.replace("%VALUE%", value).replace("%ARGS%", arguments);
         run_shell(&command)
+    }
+
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability {
+            name: self.name().into(),
+            name_pretty: self.pretty_name().into(),
+            description: "Open configured TOML menus".into(),
+            prefixes: Vec::new(),
+            actions: action_map(&[
+                ("open", ActionCapability::new("Open")),
+                ("default", ActionCapability::new("Default").needs_args()),
+            ]),
+            supports_query: true,
+            supports_activate: true,
+            supports_streaming: true,
+            supports_subscriptions: false,
+            emits_events: false,
+        }
     }
 }
 

@@ -74,6 +74,52 @@
           package = cfg.package;
           socket = cfg.socket;
           runtimePath = lib.makeBinPath cfg.runtimePackages;
+          defaultSettings = {
+            file_roots = [ "~" ];
+            ignored_dirs = [
+              "~/.cache"
+              "~/.local/share/Trash"
+              "~/.cargo/registry"
+              "~/.rustup"
+              "~/.npm"
+              "~/.pnpm-store"
+              "~/.var/app"
+              ".git"
+              "node_modules"
+              "target"
+              "dist"
+              "build"
+              ".direnv"
+            ];
+            runner_scan_path = true;
+            thumbnail_cache_enabled = true;
+            provider_enabled = {
+              apps = true;
+              files = true;
+              runner = true;
+              clipboard = true;
+              windows = true;
+              calc = true;
+              menus = true;
+            };
+            provider_weights = {
+              apps = 20000;
+              runner = 12000;
+              calc = 10000;
+              windows = 6000;
+              menus = 2000;
+              files = 0;
+              clipboard = 0;
+            };
+            query_prefixes = {
+              ">" = "runner";
+              "/" = "files";
+              "#" = "clipboard";
+              "@" = "windows";
+              ":" = "menus";
+              "?" = "calc";
+            };
+          };
         in
         {
           options.programs.epochoxide = {
@@ -107,7 +153,7 @@
             };
             settings = lib.mkOption {
               type = tomlFormat.type;
-              default = { };
+              default = defaultSettings;
               description = "Settings written to ~/.config/epochoxide/config.toml.";
             };
           };
@@ -115,8 +161,8 @@
           config = lib.mkIf cfg.enable {
             home.packages = [ package ];
 
-            xdg.configFile."epochoxide/config.toml" = lib.mkIf (cfg.settings != { }) {
-              source = tomlFormat.generate "epochoxide-config.toml" cfg.settings;
+            xdg.configFile."epochoxide/config.toml" = {
+              source = tomlFormat.generate "epochoxide-config.toml" (defaultSettings // cfg.settings);
             };
 
             systemd.user.services.epochoxide = lib.mkIf cfg.enableService {
@@ -148,6 +194,54 @@
           cfg = config.services.epochoxide;
           package = cfg.package;
           runtimePath = lib.makeBinPath cfg.runtimePackages;
+          tomlFormat = pkgs.formats.toml { };
+          defaultSettings = {
+            file_roots = [ "~" ];
+            ignored_dirs = [
+              "~/.cache"
+              "~/.local/share/Trash"
+              "~/.cargo/registry"
+              "~/.rustup"
+              "~/.npm"
+              "~/.pnpm-store"
+              "~/.var/app"
+              ".git"
+              "node_modules"
+              "target"
+              "dist"
+              "build"
+              ".direnv"
+            ];
+            runner_scan_path = true;
+            thumbnail_cache_enabled = true;
+            provider_enabled = {
+              apps = true;
+              files = true;
+              runner = true;
+              clipboard = true;
+              windows = true;
+              calc = true;
+              menus = true;
+            };
+            provider_weights = {
+              apps = 20000;
+              runner = 12000;
+              calc = 10000;
+              windows = 6000;
+              menus = 2000;
+              files = 0;
+              clipboard = 0;
+            };
+            query_prefixes = {
+              ">" = "runner";
+              "/" = "files";
+              "#" = "clipboard";
+              "@" = "windows";
+              ":" = "menus";
+              "?" = "calc";
+            };
+          };
+          configFile = tomlFormat.generate "epochoxide-config.toml" (defaultSettings // cfg.settings);
         in
         {
           options.services.epochoxide = {
@@ -174,6 +268,11 @@
               ];
               description = "Runtime tools made available to providers in the user service.";
             };
+            settings = lib.mkOption {
+              type = tomlFormat.type;
+              default = defaultSettings;
+              description = "Settings passed to the user daemon via a generated TOML config.";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -185,7 +284,7 @@
               wantedBy = [ "default.target" ];
               serviceConfig = {
                 Type = "simple";
-                ExecStart = "${package}/bin/epochoxide serve --socket ${cfg.socket}";
+                ExecStart = "${package}/bin/epochoxide --config ${configFile} serve --socket ${cfg.socket}";
                 Environment = "PATH=${runtimePath}";
                 Restart = "on-failure";
                 RestartSec = 1;

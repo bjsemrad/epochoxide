@@ -1,6 +1,8 @@
 mod client;
 mod config;
 mod fuzzy;
+mod history;
+mod icons;
 mod providers;
 mod service;
 mod server;
@@ -33,6 +35,8 @@ enum Command {
         limit: usize,
         #[arg(long, default_value_t = false)]
         exact: bool,
+        #[arg(long, default_value_t = false)]
+        stream: bool,
     },
     Activate {
         #[arg(long)]
@@ -48,6 +52,10 @@ enum Command {
     },
     ListProviders,
     Menu { name: String },
+    Subscribe {
+        #[arg(long, value_delimiter = ',')]
+        providers: Vec<String>,
+    },
     Service { #[command(subcommand)] action: ServiceAction },
 }
 
@@ -69,10 +77,18 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Serve { socket } => {
             let socket = socket.unwrap_or_else(|| config.socket.clone());
-            let registry = Registry::new(config.clone())?;
-            server::serve(&socket, registry)
+            server::serve(&socket, move || Registry::new(config.clone()))
         }
-        Command::Query { providers, query, limit, exact } => {
+        Command::Query { providers, query, limit, exact, stream } => {
+            if stream {
+                match client::stream_query(&config.socket, &providers, &query, limit, exact) {
+                    Ok(batches) => {
+                        println!("{}", serde_json::to_string_pretty(&batches)?);
+                        return Ok(());
+                    }
+                    Err(err) => eprintln!("stream query failed, falling back: {err}"),
+                }
+            }
             if let Some(response) = client::request(&config.socket, serde_json::json!({
                 "type": "query",
                 "providers": providers.clone(),
@@ -83,7 +99,7 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 return Ok(());
             }
-            let mut registry = Registry::new(config.clone())?;
+            let registry = Registry::new(config.clone())?;
             let items = registry.query(&providers, &query, limit, exact);
             println!("{}", serde_json::to_string_pretty(&items)?);
             Ok(())
@@ -100,7 +116,7 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 return Ok(());
             }
-            let mut registry = Registry::new(config.clone())?;
+            let registry = Registry::new(config.clone())?;
             registry.activate(&provider, &identifier, &action, &query, &arguments)?;
             println!("{}", json!({"ok": true}));
             Ok(())
@@ -119,9 +135,27 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 return Ok(());
             }
-            let mut registry = Registry::new(config.clone())?;
+            let registry = Registry::new(config.clone())?;
             let items = registry.menu(&name);
             println!("{}", serde_json::to_string_pretty(&items)?);
+            Ok(())
+        }
+        Command::Subscribe { providers } => {
+            match client::subscribe(&config.socket, &providers) {
+                Ok(events) => {
+                    for event in events {
+                        let event = event?;
+                        println!("{}", serde_json::to_string(&event)?);
+                    }
+                    return Ok(());
+                }
+                Err(_) => {
+                    let registry = Registry::new(config.clone())?;
+                    for event in registry.events() {
+                        println!("{}", serde_json::to_string(&event)?);
+                    }
+                }
+            }
             Ok(())
         }
         Command::Service { action } => match action {
