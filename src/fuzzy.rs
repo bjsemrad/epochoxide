@@ -1,0 +1,54 @@
+use crate::types::FuzzyInfo;
+
+pub fn score(query: &str, candidate: &str, exact: bool, field: &str) -> Option<(i32, FuzzyInfo)> {
+    if query.is_empty() {
+        return Some((1, FuzzyInfo { start: 0, field: field.to_string(), positions: Vec::new() }));
+    }
+
+    let q = query.to_lowercase();
+    let c = candidate.to_lowercase();
+    if exact {
+        let start = c.find(&q)?;
+        let positions = (start..start + q.len()).collect::<Vec<_>>();
+        let score = 10_000 - start as i32 + q.len() as i32 * 100;
+        return Some((score, FuzzyInfo { start, field: field.to_string(), positions }));
+    }
+
+    let mut positions = Vec::with_capacity(q.len());
+    let mut needle = q.chars();
+    let mut current = needle.next()?;
+    for (idx, ch) in c.chars().enumerate() {
+        if ch == current {
+            positions.push(idx);
+            if let Some(next) = needle.next() {
+                current = next;
+            } else {
+                let start = positions[0];
+                let span = positions.last().copied().unwrap_or(start) - start + 1;
+                let compact_bonus = (100usize.saturating_sub(span) as i32).max(0);
+                let prefix_bonus = if start == 0 { 500 } else { 0 };
+                let score = 1_000 + q.len() as i32 * 100 + compact_bonus + prefix_bonus - start as i32;
+                return Some((score, FuzzyInfo { start, field: field.to_string(), positions }));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::score;
+
+    #[test]
+    fn fuzzy_matches_in_order() {
+        let (score, info) = score("ff", "Firefox", false, "text").unwrap();
+        assert!(score > 0);
+        assert_eq!(info.positions, vec![0, 4]);
+    }
+
+    #[test]
+    fn exact_requires_substring() {
+        assert!(score("fox", "Firefox", true, "text").is_some());
+        assert!(score("fx", "Firefox", true, "text").is_none());
+    }
+}

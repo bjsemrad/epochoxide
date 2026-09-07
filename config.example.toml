@@ -1,0 +1,12 @@
+socket = "/run/user/1000/epochoxide.sock"
+file_roots = ["~/Documents", "~/Downloads"]
+ignored_dirs = ["~/.cache", ".git", "node_modules", "target"]
+menus_dir = "~/.config/epochoxide/menus"
+launch_prefix = ""
+terminal_cmd = ""
+clipboard_max_items = 100
+clipboard_image_dir = "~/.cache/epochoxide/clipboard/images"
+clipboard_text_editor = "xdg-open"
+clipboard_image_editor = ""
+clipboard_ocr = false
+clipboard_capture_interval_ms = 250

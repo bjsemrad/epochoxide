@@ -1,0 +1,14 @@
+name = "bookmarks"
+name_pretty = "Bookmarks"
+icon = "bookmark"
+action = "xdg-open %VALUE%"
+
+[[entries]]
+text = "Rust"
+value = "https://www.rust-lang.org"
+keywords = ["language", "systems"]
+
+[[entries]]
+text = "EpochOxide"
+value = "https://github.com/"
+keywords = ["desktop", "provider"]
