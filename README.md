@@ -2,7 +2,7 @@
 
 EpochOxide is a fast Rust data provider for Linux desktop shells, launchers, panels, and productivity tools.
 
-It runs as a small user daemon, keeps common desktop data warm in memory, and exposes one query/activation interface for applications, files, clipboard history, windows, calculations, and custom menus. It is inspired by Elephant, but designed around a lean Rust implementation and a simple socket protocol that shell UIs can integrate quickly.
+It runs as a small user daemon, keeps common desktop data warm in memory, and exposes one query/activation interface for applications, files, clipboard history, windows, calculations, and custom menus. EpochOxide is designed around a lean Rust implementation and a simple socket protocol that shell UIs can integrate quickly.
 
 ## Features
 
@@ -13,7 +13,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - Clipboard edit actions for text and image clips.
 - Window search and focus for Hyprland, Sway, Niri, and X11/wmctrl environments.
 - Calculator results through `qalc` when available, with local arithmetic fallback.
-- Elephant-style custom TOML menus.
+- Custom TOML menus.
 - User systemd service for warm, low-latency queries.
 - Nix flake package, Home Manager module, and NixOS module.
 - JSON-over-Unix-socket protocol for easy shell integration.
@@ -28,7 +28,7 @@ EpochOxide centralizes that work in one long-lived user daemon. A launcher can k
 
 EpochOxide is early but usable. The current focus is building a fast, practical Linux desktop-shell backend with a stable enough local protocol for launcher experimentation.
 
-The project is not wire-compatible with Elephant yet. Elephant uses its own socket framing/protobuf-style message flow; EpochOxide currently uses newline-delimited JSON for simplicity and ease of integration.
+EpochOxide currently uses newline-delimited JSON for simplicity and ease of integration. A binary protocol can be added later if a shell frontend needs lower overhead or stronger schema guarantees.
 
 ## Quick Start
 
@@ -225,7 +225,7 @@ epochoxide query --providers calc --query "sqrt(144)" --limit 5
 
 ### Menus
 
-The `menus` provider loads Elephant-style TOML menu definitions from the configured menu directory.
+The `menus` provider loads TOML menu definitions from the configured menu directory.
 
 ```bash
 epochoxide query --providers menus --query bookmarks --limit 10
@@ -456,7 +456,7 @@ Future performance work:
 - Thumbnail cache.
 - Lua or WASM dynamic menus.
 - Provider subscriptions and frontend update events.
-- Optional Elephant protocol compatibility.
+- Optional binary protocol compatibility for lower-latency frontends.
 - More providers: bookmarks, snippets, symbols, media, Bluetooth, package managers, secrets, and commands.
 
 ## License

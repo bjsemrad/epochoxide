@@ -115,7 +115,7 @@ mod tests {
     use super::Menu;
 
     #[test]
-    fn parses_elephant_style_menu() {
+    fn parses_toml_menu() {
         let raw = "name = 'bookmarks'\naction = 'xdg-open %VALUE%'\n[[entries]]\ntext = 'Rust'\nvalue = 'https://rust-lang.org'\n";
         let menu: Menu = toml::from_str(raw).unwrap();
         assert_eq!(menu.name, "bookmarks");

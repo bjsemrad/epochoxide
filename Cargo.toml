@@ -3,7 +3,7 @@ name = "epochoxide"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Fast Rust desktop shell data provider inspired by Elephant"
+description = "Fast Rust desktop shell data provider"
 
 [dependencies]
 anyhow = "1.0"
