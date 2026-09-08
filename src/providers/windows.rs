@@ -8,6 +8,49 @@ pub struct WindowsProvider { wm_class_icons: HashMap<String, String> }
 
 impl WindowsProvider {
     pub fn new(wm_class_icons: HashMap<String, String>) -> Self { Self { wm_class_icons } }
+
+    fn icon_for(&self, app: &str) -> String {
+        icon_candidates(app).into_iter()
+            .find_map(|key| self.wm_class_icons.get(&key).cloned())
+            .unwrap_or_else(|| "preferences-system-windows".into())
+    }
+}
+
+const BROWSER_PREFIXES: [&str; 6] = ["google-chrome-", "microsoft-edge-", "chromium-", "chrome-", "brave-", "vivaldi-"];
+
+/// Desktop-entry keys to try for a window class, best first.
+///
+/// An exact match covers well-behaved apps. Chromium-family web apps do not report the
+/// `StartupWMClass` their .desktop file declares — they report `brave-gmail.com__-Default` or
+/// `brave-mail.proton.me__u_0_inbox-Default` — so the host is peeled out of the class and tried
+/// as a name, then by domain, and finally the browser itself so a web app at least gets the
+/// browser's icon instead of a generic window.
+fn icon_candidates(app: &str) -> Vec<String> {
+    let key = app.to_lowercase();
+    let mut out = vec![key.clone()];
+
+    let base = key.split("__").next().unwrap_or(&key).trim_end_matches("-default").to_string();
+    out.push(base.clone());
+
+    let browser = BROWSER_PREFIXES.iter().find(|prefix| base.starts_with(**prefix));
+    let host = browser.and_then(|prefix| base.strip_prefix(*prefix)).unwrap_or(&base).to_string();
+    out.push(host.clone());
+
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() > 1 {
+        out.push(labels[0].to_string());
+        for start in 1..labels.len() - 1 { out.push(labels[start..].join(".")); }
+        out.push(labels[labels.len() - 1].to_string());
+    }
+
+    if let Some(prefix) = browser {
+        let name = prefix.trim_end_matches('-');
+        out.push(format!("{name}-browser"));
+        out.push(name.to_string());
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    out.into_iter().filter(|key| !key.is_empty() && seen.insert(key.clone())).collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,7 +77,7 @@ impl Provider for WindowsProvider {
             if let Some((score, info)) = fuzzy::score(query, &haystack, exact, "text") {
                 let mut item = Item::new(self.name(), format!("{}:{}", window.backend, window.id), window.title);
                 item.subtext = format!("{} {}", window.app, window.workspace).trim().to_string();
-                item.icon = self.wm_class_icons.get(&window.app.to_lowercase()).cloned().unwrap_or_else(|| "preferences-system-windows".into());
+                item.icon = self.icon_for(&window.app);
                 item.actions = vec!["focus".into(), "close".into()];
                 item.score = score + 5_000;
                 item.fuzzyinfo = Some(info);
@@ -260,7 +303,8 @@ fn runtime_dir() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_from_env, Backend};
+    use super::{backend_from_env, icon_candidates, Backend, WindowsProvider};
+    use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::OnceLock;
 
@@ -296,5 +340,38 @@ mod tests {
         let _g = lock_env();
         set(&[]);
         assert_eq!(backend_from_env(), Backend::Wmctrl);
+    }
+
+    fn provider(entries: &[(&str, &str)]) -> WindowsProvider {
+        WindowsProvider::new(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>())
+    }
+
+    #[test]
+    fn matches_window_class_exactly() {
+        let provider = provider(&[("com.mitchellh.ghostty", "ghostty-icon")]);
+        assert_eq!(provider.icon_for("com.mitchellh.ghostty"), "ghostty-icon");
+    }
+
+    #[test]
+    fn matches_chromium_webapp_class_by_host() {
+        // Brave reports these classes; the .desktop files declare StartupWMClass=gmail / proton.me.
+        let provider = provider(&[("gmail", "gmail-icon"), ("proton.me", "proton-icon")]);
+        assert_eq!(provider.icon_for("brave-gmail.com__-Default"), "gmail-icon");
+        assert_eq!(provider.icon_for("brave-mail.proton.me__u_0_inbox-Default"), "proton-icon");
+    }
+
+    #[test]
+    fn falls_back_to_the_browser_then_a_generic_window() {
+        let provider = provider(&[("brave-browser", "brave-icon")]);
+        assert_eq!(provider.icon_for("brave-unknown.example__-Default"), "brave-icon");
+        assert_eq!(provider.icon_for("some-unknown-app"), "preferences-system-windows");
+    }
+
+    #[test]
+    fn prefers_earlier_candidates() {
+        let candidates = icon_candidates("brave-gmail.com__-Default");
+        let gmail = candidates.iter().position(|c| c == "gmail").unwrap();
+        let brave = candidates.iter().position(|c| c == "brave-browser").unwrap();
+        assert!(gmail < brave);
     }
 }

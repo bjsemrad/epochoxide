@@ -41,16 +41,8 @@ impl AppsProvider {
     fn reload(&mut self) -> Result<()> {
         self.apps.clear();
         let mut seen = std::collections::HashSet::new();
-        let mut dirs = Vec::new();
-        if let Some(data_home) = dirs::data_dir() { dirs.push(data_home.join("applications")); }
-        if let Ok(data_dirs) = std::env::var("XDG_DATA_DIRS") {
-            dirs.extend(data_dirs.split(':').map(|d| PathBuf::from(d).join("applications")));
-        } else {
-            dirs.push(PathBuf::from("/usr/share/applications"));
-            dirs.push(PathBuf::from("/usr/local/share/applications"));
-        }
 
-        for dir in dirs {
+        for dir in application_dirs() {
             if !dir.exists() { continue; }
             for entry in walkdir::WalkDir::new(&dir).follow_links(true).into_iter().filter_map(|e| e.ok()) {
                 if entry.path().extension().and_then(|e| e.to_str()) == Some("desktop") {
@@ -137,6 +129,34 @@ impl Provider for AppsProvider {
             emits_events: false,
         }
     }
+}
+
+/// Desktop entry directories, in precedence order. XDG_DATA_DIRS is honoured when present, but
+/// a service started by systemd frequently inherits a near-empty environment (no XDG_DATA_DIRS
+/// at all), which would silently reduce the app list — and every icon derived from it, including
+/// window icons — to whatever lives under XDG_DATA_HOME. The profile locations below are probed
+/// unconditionally for that case; missing ones are skipped.
+fn application_dirs() -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+    if let Some(data_home) = dirs::data_dir() { bases.push(data_home); }
+    if let Ok(data_dirs) = std::env::var("XDG_DATA_DIRS") {
+        bases.extend(data_dirs.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+    }
+    if let Some(home) = dirs::home_dir() {
+        bases.push(home.join(".nix-profile/share"));
+        if let Some(user) = home.file_name() {
+            bases.push(PathBuf::from("/etc/profiles/per-user").join(user).join("share"));
+        }
+    }
+    bases.extend([
+        "/run/current-system/sw/share",
+        "/nix/var/nix/profiles/default/share",
+        "/usr/local/share",
+        "/usr/share",
+    ].map(PathBuf::from));
+
+    let mut seen = std::collections::HashSet::new();
+    bases.into_iter().map(|base| base.join("applications")).filter(|dir| seen.insert(dir.clone()) && dir.exists()).collect()
 }
 
 fn app_name_bonus(query_lower: &str, name: &str) -> i32 {
