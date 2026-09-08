@@ -10,6 +10,7 @@ struct Menu {
     name_pretty: Option<String>,
     icon: Option<String>,
     action: Option<String>,
+    command: Option<String>,
     actions: Option<HashMap<String, String>>,
     entries: Option<Vec<MenuEntry>>,
 }
@@ -70,7 +71,8 @@ impl Provider for MenusProvider {
 
     fn menu(&mut self, menu_name: &str) -> Vec<Item> {
         let Some(menu) = self.menus.get(menu_name) else { return Vec::new(); };
-        menu.entries.clone().unwrap_or_default().into_iter().enumerate().map(|(idx, entry)| {
+        let entries = menu.command.as_deref().and_then(command_entries).or_else(|| menu.entries.clone()).unwrap_or_default();
+        entries.into_iter().enumerate().map(|(idx, entry)| {
             let mut item = Item::new(self.name(), format!("{menu_name}:{idx}"), entry.text.clone());
             item.subtext = entry.subtext.unwrap_or_else(|| {
                 entry.value.clone().or_else(|| entry.keywords.clone().map(|k| k.join(" "))).unwrap_or_default()
@@ -92,7 +94,8 @@ impl Provider for MenusProvider {
         let (menu_name, idx) = identifier.split_once(':').context("invalid menu identifier")?;
         let idx: usize = idx.parse()?;
         let menu = self.menus.get(menu_name).context("menu not found")?;
-        let entry = menu.entries.as_ref().and_then(|e| e.get(idx)).context("menu entry not found")?;
+        let entries = menu.command.as_deref().and_then(command_entries).or_else(|| menu.entries.clone()).unwrap_or_default();
+        let entry = entries.get(idx).context("menu entry not found")?;
         if action == "open" && entry.submenu.is_some() { return Ok(()); }
         let mut command = entry.actions.as_ref().and_then(|a| a.get(action)).cloned()
             .or_else(|| menu.actions.as_ref().and_then(|a| a.get(action)).cloned())
@@ -121,6 +124,12 @@ impl Provider for MenusProvider {
             emits_events: false,
         }
     }
+}
+
+fn command_entries(command: &str) -> Option<Vec<MenuEntry>> {
+    let out = std::process::Command::new("sh").arg("-c").arg(command).output().ok()?;
+    if !out.status.success() { return None; }
+    serde_json::from_slice(&out.stdout).ok()
 }
 
 fn command_preview(command: &str) -> String {

@@ -80,7 +80,36 @@ impl Provider for WindowsProvider {
 }
 
 fn discover_windows() -> Vec<Window> {
-    hypr_windows().or_else(sway_windows).or_else(niri_windows).or_else(wmctrl_windows).unwrap_or_default()
+    match detect_backend() {
+        Backend::Hypr => hypr_windows().or_else(wmctrl_windows),
+        Backend::Sway => sway_windows().or_else(wmctrl_windows),
+        Backend::Niri => niri_windows().or_else(wmctrl_windows),
+        Backend::Wmctrl => wmctrl_windows(),
+    }.unwrap_or_default()
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Backend { Hypr, Sway, Niri, Wmctrl }
+
+fn detect_backend() -> Backend {
+    let hypr = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE");
+    let sway = std::env::var_os("SWAYSOCK");
+    let niri = std::env::var_os("NIRI_SOCKET");
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+    detect_from_env(hypr.is_some(), sway.is_some(), niri.is_some(), desktop.as_deref())
+}
+
+fn detect_from_env(hypr: bool, sway: bool, niri: bool, desktop: Option<&str>) -> Backend {
+    if hypr { return Backend::Hypr; }
+    if sway { return Backend::Sway; }
+    if niri { return Backend::Niri; }
+    if let Some(d) = desktop {
+        let d = d.to_lowercase();
+        if d.contains("hypr") { return Backend::Hypr; }
+        if d.contains("sway") { return Backend::Sway; }
+        if d.contains("niri") { return Backend::Niri; }
+    }
+    Backend::Wmctrl
 }
 
 fn hypr_windows() -> Option<Vec<Window>> {
@@ -130,4 +159,24 @@ fn wmctrl_windows() -> Option<Vec<Window>> {
         let title = parts.collect::<Vec<_>>().join(" ");
         Some(Window { id, title, app, workspace: String::new(), backend: "wmctrl" })
     }).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detect_from_env, Backend};
+
+    #[test]
+    fn detects_hyprland_from_instance_signature() {
+        assert_eq!(detect_from_env(true, false, false, None), Backend::Hypr);
+    }
+
+    #[test]
+    fn detects_niri_from_xdg_desktop() {
+        assert_eq!(detect_from_env(false, false, false, Some("niri")), Backend::Niri);
+    }
+
+    #[test]
+    fn defaults_to_wmctrl_without_signals() {
+        assert_eq!(detect_from_env(false, false, false, None), Backend::Wmctrl);
+    }
 }

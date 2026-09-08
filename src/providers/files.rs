@@ -16,15 +16,14 @@ pub struct LazyFilesProvider {
 impl LazyFilesProvider {
     pub fn new(config: Config) -> Self {
         let inner = Arc::new(Mutex::new(None));
-        let load_inner = Arc::clone(&inner);
-        let load_config = config.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(30));
-            let start = Instant::now();
-            let provider = FilesProvider::new(load_config);
-            eprintln!("files provider ready in {:?} ({} entries)", start.elapsed(), provider.files.len());
-            *load_inner.lock().unwrap() = Some(provider);
-        });
+        if fd_program().is_none() {
+            let load_inner = Arc::clone(&inner);
+            let load_config = config.clone();
+            thread::spawn(move || {
+                let provider = FilesProvider::new(load_config);
+                *load_inner.lock().unwrap() = Some(provider);
+            });
+        }
         Self { config, inner }
     }
 }
@@ -43,7 +42,7 @@ impl Provider for LazyFilesProvider {
 
     fn activate(&mut self, identifier: &str, action: &str, query: &str, arguments: &str) -> Result<()> {
         let Ok(mut inner) = self.inner.try_lock() else { return Ok(()); };
-        let Some(provider) = inner.as_mut() else { return Ok(()); };
+        let Some(provider) = inner.as_mut() else { return activate_path(identifier, action); };
         provider.activate(identifier, action, query, arguments)
     }
 
@@ -281,21 +280,8 @@ impl Provider for FilesProvider {
     }
 
     fn activate(&mut self, identifier: &str, action: &str, _query: &str, _arguments: &str) -> Result<()> {
-        let path = Path::new(identifier);
-        match action {
-            "open" => run_shell(&format!("xdg-open '{}'", identifier.replace('\'', "'\\''"))),
-            "open_dir" => {
-                let dir = if path.is_dir() { path } else { path.parent().context("file has no parent")? };
-                run_shell(&format!("xdg-open '{}'", dir.display().to_string().replace('\'', "'\\''")))
-            }
-            "copy_path" => copy_text(identifier),
-            "copy_file" => {
-                let data = std::fs::read_to_string(path).context("copy_file only supports UTF-8 text files")?;
-                copy_text(&data)
-            }
-            "reindex" => { self.reindex(); Ok(()) }
-            _ => anyhow::bail!("unsupported files action: {action}"),
-        }
+        if action == "reindex" { self.reindex(); return Ok(()); }
+        activate_path(identifier, action)
     }
 
     fn events(&mut self) -> Vec<serde_json::Value> {
@@ -335,7 +321,7 @@ fn files_capability() -> ProviderCapability {
 
 fn fd_query(config: &Config, query: &str, limit: usize, exact: bool) -> Vec<Item> {
     if query.is_empty() { return Vec::new(); }
-    let program = if Command::new("fd").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok() { "fd" } else { "fdfind" };
+    let Some(program) = fd_program() else { return Vec::new(); };
     let mut command = Command::new(program);
     command.arg(query);
     for root in &config.file_roots { command.arg(expand(root)); }
@@ -364,6 +350,30 @@ fn fd_query(config: &Config, query: &str, limit: usize, exact: bool) -> Vec<Item
     items.sort_by_key(|item| std::cmp::Reverse(item.score));
     items.truncate(limit);
     items
+}
+
+fn fd_program() -> Option<&'static str> {
+    ["fd", "fdfind"].into_iter().find(|program| {
+        Command::new(program).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok()
+    })
+}
+
+fn activate_path(identifier: &str, action: &str) -> Result<()> {
+    let path = Path::new(identifier);
+    match action {
+        "open" => run_shell(&format!("xdg-open '{}'", identifier.replace('\'', "'\\''"))),
+        "open_dir" => {
+            let dir = if path.is_dir() { path } else { path.parent().context("file has no parent")? };
+            run_shell(&format!("xdg-open '{}'", dir.display().to_string().replace('\'', "'\\''")))
+        }
+        "copy_path" => copy_text(identifier),
+        "copy_file" => {
+            let data = std::fs::read_to_string(path).context("copy_file only supports UTF-8 text files")?;
+            copy_text(&data)
+        }
+        "reindex" => Ok(()),
+        _ => anyhow::bail!("unsupported files action: {action}"),
+    }
 }
 
 fn add_trigrams(index: &mut HashMap<[u8; 3], Vec<u32>>, id: u32, search: &str) {
