@@ -15,7 +15,10 @@ impl StreamClient {
         stream.set_write_timeout(Some(Duration::from_millis(1500)))?;
         stream.set_read_timeout(Some(Duration::from_millis(1500)))?;
         let reader = BufReader::new(stream.try_clone()?);
-        Ok(Self { writer: stream, reader })
+        Ok(Self {
+            writer: stream,
+            reader,
+        })
     }
 
     pub fn send(&mut self, payload: &Value) -> Result<()> {
@@ -29,15 +32,24 @@ impl StreamClient {
             match self.reader.read_line(&mut line) {
                 Ok(0) => return Ok(None),
                 Ok(_) => {
-                    if line.trim().is_empty() { return Ok(None); }
+                    if line.trim().is_empty() {
+                        return Ok(None);
+                    }
                     let value: Value = serde_json::from_str(line.trim())?;
                     if value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-                        let error = value.get("error").and_then(|v| v.as_str()).unwrap_or("daemon request failed");
+                        let error = value
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("daemon request failed");
                         bail!(error.to_string());
                     }
                     return Ok(Some(value.get("data").cloned().unwrap_or(value)));
                 }
-                Err(err) if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut => continue,
+                Err(err)
+                    if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut =>
+                {
+                    continue
+                }
                 Err(err) => return Err(err).context("reading daemon response"),
             }
         }
@@ -53,7 +65,13 @@ pub fn request(socket: &str, payload: Value) -> Result<Option<Value>> {
     client.next()
 }
 
-pub fn stream_query(socket: &str, providers: &[String], query: &str, limit: usize, exact: bool) -> Result<Vec<(String, Vec<Value>)>> {
+pub fn stream_query(
+    socket: &str,
+    providers: &[String],
+    query: &str,
+    limit: usize,
+    exact: bool,
+) -> Result<Vec<(String, Vec<Value>)>> {
     let mut client = StreamClient::connect(socket)?;
     client.send(&serde_json::json!({
         "type": "query",
@@ -67,8 +85,16 @@ pub fn stream_query(socket: &str, providers: &[String], query: &str, limit: usiz
     while let Some(data) = client.next()? {
         match data.get("type").and_then(|v| v.as_str()) {
             Some("query_batch") => {
-                let provider = data.get("provider").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let items = data.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let provider = data
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let items = data
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 batches.push((provider, items));
             }
             Some("done") => break,
@@ -78,7 +104,10 @@ pub fn stream_query(socket: &str, providers: &[String], query: &str, limit: usiz
     Ok(batches)
 }
 
-pub fn subscribe(socket: &str, providers: &[String]) -> Result<impl Iterator<Item = Result<Value>>> {
+pub fn subscribe(
+    socket: &str,
+    providers: &[String],
+) -> Result<impl Iterator<Item = Result<Value>>> {
     let mut client = StreamClient::connect(socket)?;
     client.send(&serde_json::json!({ "type": "subscribe", "providers": providers }))?;
     let initial = client.next()?;

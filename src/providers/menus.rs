@@ -1,12 +1,19 @@
 use super::{copy_text, run_shell, Provider};
-use crate::{config::{expand, Config}, fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
+use crate::{
+    config::{expand, Config},
+    fuzzy,
+    types::{action_map, ActionCapability, Item, ProviderCapability},
+};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
     fs,
     path::Path,
-    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -50,25 +57,45 @@ struct MenuEntry {
 
 impl MenuEntry {
     /// Enter copies rather than runs when the entry carries `copy`.
-    fn is_copy(&self) -> bool { self.copy.is_some() }
+    fn is_copy(&self) -> bool {
+        self.copy.is_some()
+    }
 
     /// Actions in a stable order, `default`/`copy` first, so the shell's "first action is Enter"
     /// rule lands on the same one every time (a HashMap's own order is not stable between runs).
     fn action_names(&self, menu: &Menu) -> Vec<String> {
-        if self.is_copy() { return vec!["copy".into()]; }
-        let mut names: Vec<String> = self.actions.as_ref().or(menu.actions.as_ref())
-            .map(|a| a.keys().cloned().collect()).unwrap_or_default();
+        if self.is_copy() {
+            return vec!["copy".into()];
+        }
+        let mut names: Vec<String> = self
+            .actions
+            .as_ref()
+            .or(menu.actions.as_ref())
+            .map(|a| a.keys().cloned().collect())
+            .unwrap_or_default();
         names.sort();
-        if names.is_empty() { names.push("default".into()); }
-        if let Some(pos) = names.iter().position(|n| n == "default") { names.swap(0, pos); }
-        if self.submenu.is_some() { names.push("open".into()); }
+        if names.is_empty() {
+            names.push("default".into());
+        }
+        if let Some(pos) = names.iter().position(|n| n == "default") {
+            names.swap(0, pos);
+        }
+        if self.submenu.is_some() {
+            names.push("open".into());
+        }
         names
     }
 
     fn haystack(&self) -> String {
         let mut out = self.text.clone();
-        if let Some(subtext) = &self.subtext { out.push(' '); out.push_str(subtext); }
-        if let Some(keywords) = &self.keywords { out.push(' '); out.push_str(&keywords.join(" ")); }
+        if let Some(subtext) = &self.subtext {
+            out.push(' ');
+            out.push_str(subtext);
+        }
+        if let Some(keywords) = &self.keywords {
+            out.push(' ');
+            out.push_str(&keywords.join(" "));
+        }
         out
     }
 }
@@ -93,9 +120,18 @@ impl MenuProvider {
     fn new(menu: Menu) -> Self {
         let provider = Self {
             name: menu.name.clone(),
-            pretty: menu.name_pretty.clone().unwrap_or_else(|| menu.name.clone()),
-            description: menu.description.clone().unwrap_or_else(|| "Custom menu".into()),
-            icon: menu.icon.clone().unwrap_or_else(|| "applications-other".into()),
+            pretty: menu
+                .name_pretty
+                .clone()
+                .unwrap_or_else(|| menu.name.clone()),
+            description: menu
+                .description
+                .clone()
+                .unwrap_or_else(|| "Custom menu".into()),
+            icon: menu
+                .icon
+                .clone()
+                .unwrap_or_else(|| "applications-other".into()),
             menu,
             cache: Arc::new(Mutex::new(None)),
             refreshing: Arc::new(AtomicBool::new(false)),
@@ -103,18 +139,24 @@ impl MenuProvider {
         // Generators are slow enough to be worth having ready before anyone asks: the keybinds
         // menu shells out to the compositor and takes seconds, which is a launcher that shows
         // nothing for seconds if the first query is what starts it.
-        if provider.menu.command.is_some() { provider.spawn_refresh(); }
+        if provider.menu.command.is_some() {
+            provider.spawn_refresh();
+        }
         provider
     }
 
     fn generate(menu: &Menu) -> Vec<MenuEntry> {
-        menu.command.as_deref().and_then(command_entries)
+        menu.command
+            .as_deref()
+            .and_then(command_entries)
             .or_else(|| menu.entries.clone())
             .unwrap_or_default()
     }
 
     fn spawn_refresh(&self) {
-        if self.refreshing.swap(true, Ordering::SeqCst) { return; }
+        if self.refreshing.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let menu = self.menu.clone();
         let cache = Arc::clone(&self.cache);
         let refreshing = Arc::clone(&self.refreshing);
@@ -132,11 +174,21 @@ impl MenuProvider {
     /// generator costs the user nothing after the first time. Only a menu nobody has generated
     /// yet is waited on.
     fn entries(&mut self, opening: bool) -> Vec<MenuEntry> {
-        let ttl = self.menu.cache_ms.map(Duration::from_millis).unwrap_or(ENTRY_TTL);
+        let ttl = self
+            .menu
+            .cache_ms
+            .map(Duration::from_millis)
+            .unwrap_or(ENTRY_TTL);
         let cached = self.cache.lock().unwrap().clone();
         if let Some((stamp, entries)) = cached {
-            let fresh_enough = if opening { stamp.elapsed() < MIN_REFRESH } else { stamp.elapsed() < ttl };
-            if !fresh_enough { self.spawn_refresh(); }
+            let fresh_enough = if opening {
+                stamp.elapsed() < MIN_REFRESH
+            } else {
+                stamp.elapsed() < ttl
+            };
+            if !fresh_enough {
+                self.spawn_refresh();
+            }
             return entries;
         }
         let entries = Self::generate(&self.menu);
@@ -147,7 +199,10 @@ impl MenuProvider {
     fn item(&self, idx: usize, entry: &MenuEntry, total: usize) -> Item {
         let mut item = Item::new(&self.name, idx.to_string(), entry.text.clone());
         item.subtext = entry.subtext.clone().unwrap_or_else(|| {
-            entry.copy.clone().or_else(|| entry.value.clone())
+            entry
+                .copy
+                .clone()
+                .or_else(|| entry.value.clone())
                 .or_else(|| entry.keywords.clone().map(|k| k.join(" ")))
                 .unwrap_or_default()
         });
@@ -164,8 +219,12 @@ impl MenuProvider {
 }
 
 impl Provider for MenuProvider {
-    fn name(&self) -> &str { &self.name }
-    fn pretty_name(&self) -> &str { &self.pretty }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn pretty_name(&self) -> &str {
+        &self.pretty
+    }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         let entries = self.entries(query.is_empty());
@@ -187,25 +246,57 @@ impl Provider for MenuProvider {
     fn menu(&mut self, _menu: &str) -> Vec<Item> {
         let entries = self.entries(true);
         let total = entries.len();
-        entries.iter().enumerate().map(|(idx, entry)| self.item(idx, entry, total)).collect()
+        entries
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| self.item(idx, entry, total))
+            .collect()
     }
 
-    fn activate(&mut self, identifier: &str, action: &str, _query: &str, arguments: &str) -> Result<()> {
+    fn activate(
+        &mut self,
+        identifier: &str,
+        action: &str,
+        _query: &str,
+        arguments: &str,
+    ) -> Result<()> {
         let idx: usize = identifier.parse().context("invalid menu entry")?;
         let entries = self.entries(false);
         let entry = entries.get(idx).context("menu entry not found")?;
-        if action == "open" && entry.submenu.is_some() { return Ok(()); }
+        if action == "open" && entry.submenu.is_some() {
+            return Ok(());
+        }
         if entry.is_copy() || action == "copy" {
-            let text = entry.copy.as_deref().or(entry.value.as_deref()).unwrap_or(&entry.text);
+            let text = entry
+                .copy
+                .as_deref()
+                .or(entry.value.as_deref())
+                .unwrap_or(&entry.text);
             return copy_text(text);
         }
-        let mut command = entry.actions.as_ref().and_then(|a| a.get(action)).cloned()
-            .or_else(|| self.menu.actions.as_ref().and_then(|a| a.get(action)).cloned())
+        let mut command = entry
+            .actions
+            .as_ref()
+            .and_then(|a| a.get(action))
+            .cloned()
+            .or_else(|| {
+                self.menu
+                    .actions
+                    .as_ref()
+                    .and_then(|a| a.get(action))
+                    .cloned()
+            })
             .or_else(|| self.menu.action.clone());
-        if action == "default" && command.is_none() { command = self.menu.action.clone(); }
-        let Some(mut command) = command else { return Ok(()); };
+        if action == "default" && command.is_none() {
+            command = self.menu.action.clone();
+        }
+        let Some(mut command) = command else {
+            return Ok(());
+        };
         let value = entry.value.as_deref().unwrap_or(&entry.text);
-        command = command.replace("%VALUE%", value).replace("%ARGS%", arguments);
+        command = command
+            .replace("%VALUE%", value)
+            .replace("%ARGS%", arguments);
         run_shell(&command)
     }
 
@@ -233,29 +324,50 @@ impl Provider for MenuProvider {
 /// Loads every `*.toml` in the menus directory as its own provider, in name order.
 pub fn providers(config: &Config) -> Result<Vec<Box<dyn Provider>>> {
     let dir = expand(&config.menus_dir);
-    if !Path::new(&dir).exists() { return Ok(Vec::new()); }
+    if !Path::new(&dir).exists() {
+        return Ok(Vec::new());
+    }
     let mut menus = Vec::new();
     for entry in fs::read_dir(&dir).with_context(|| format!("reading menu dir {dir}"))? {
         let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") { continue; }
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
         let raw = fs::read_to_string(&path)?;
-        let menu: Menu = toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-        if !menu.name.is_empty() { menus.push(menu); }
+        let menu: Menu =
+            toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        if !menu.name.is_empty() {
+            menus.push(menu);
+        }
     }
     menus.sort_by(|a, b| a.name.cmp(&b.name));
     menus.dedup_by(|a, b| a.name == b.name);
-    Ok(menus.into_iter().map(|menu| Box::new(MenuProvider::new(menu)) as Box<dyn Provider>).collect())
+    Ok(menus
+        .into_iter()
+        .map(|menu| Box::new(MenuProvider::new(menu)) as Box<dyn Provider>)
+        .collect())
 }
 
 fn command_entries(command: &str) -> Option<Vec<MenuEntry>> {
-    let out = std::process::Command::new("sh").arg("-c").arg(command).output().ok()?;
-    if !out.status.success() { return None; }
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
     serde_json::from_slice(&out.stdout).ok()
 }
 
 fn command_preview(command: &str) -> String {
-    std::process::Command::new("sh").arg("-c").arg(command).output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -263,7 +375,9 @@ mod tests {
     use super::{Menu, MenuEntry, MenuProvider};
     use crate::providers::Provider;
 
-    fn menu(raw: &str) -> Menu { toml::from_str(raw).unwrap() }
+    fn menu(raw: &str) -> Menu {
+        toml::from_str(raw).unwrap()
+    }
 
     #[test]
     fn parses_toml_menu() {
@@ -274,7 +388,9 @@ mod tests {
 
     #[test]
     fn each_menu_is_its_own_provider() {
-        let provider = MenuProvider::new(menu("name = 'keybinds'\nname_pretty = 'Keybinds'\nicon = 'input-keyboard'\n"));
+        let provider = MenuProvider::new(menu(
+            "name = 'keybinds'\nname_pretty = 'Keybinds'\nicon = 'input-keyboard'\n",
+        ));
         let cap = provider.capability();
         assert_eq!(cap.name, "keybinds");
         assert_eq!(cap.name_pretty, "Keybinds");
@@ -309,7 +425,8 @@ mod tests {
         let path = dir.join("entries.json");
         std::fs::write(&path, r#"[{"text":"first"}]"#).unwrap();
         let mut provider = MenuProvider::new(menu(&format!(
-            "name = 'gen'\ncache_ms = 600000\ncommand = 'cat {}'\n", path.display()
+            "name = 'gen'\ncache_ms = 600000\ncommand = 'cat {}'\n",
+            path.display()
         )));
 
         assert_eq!(provider.query("", 10, false)[0].text, "first");
@@ -322,7 +439,9 @@ mod tests {
         assert_eq!(provider.query("", 10, false)[0].text, "first");
         for _ in 0..50 {
             std::thread::sleep(std::time::Duration::from_millis(20));
-            if provider.query("", 10, false)[0].text == "second" { break; }
+            if provider.query("", 10, false)[0].text == "second" {
+                break;
+            }
         }
         assert_eq!(provider.query("", 10, false)[0].text, "second");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -339,14 +458,18 @@ mod tests {
 
     #[test]
     fn entry_falls_back_to_the_menu_icon() {
-        let provider = MenuProvider::new(menu("name = 'm'\nicon = 'input-keyboard'\n[[entries]]\ntext = 'a'\n"));
+        let provider = MenuProvider::new(menu(
+            "name = 'm'\nicon = 'input-keyboard'\n[[entries]]\ntext = 'a'\n",
+        ));
         let entry: MenuEntry = toml::from_str("text = 'a'").unwrap();
         assert_eq!(provider.item(0, &entry, 1).icon, "input-keyboard");
     }
 
     #[test]
     fn default_action_sorts_ahead_of_the_rest() {
-        let entry: MenuEntry = toml::from_str("text = 'a'\n[actions]\nzeta = 'z'\ndefault = 'd'\nalpha = 'a'").unwrap();
+        let entry: MenuEntry =
+            toml::from_str("text = 'a'\n[actions]\nzeta = 'z'\ndefault = 'd'\nalpha = 'a'")
+                .unwrap();
         assert_eq!(entry.action_names(&Menu::default())[0], "default");
     }
 }

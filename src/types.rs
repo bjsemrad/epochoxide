@@ -45,12 +45,29 @@ pub struct ActionCapability {
 
 impl ActionCapability {
     pub fn new(label: impl Into<String>) -> Self {
-        Self { label: label.into(), needs_args: false, destructive: false, async_action: false, terminal: false, confirmation: false }
+        Self {
+            label: label.into(),
+            needs_args: false,
+            destructive: false,
+            async_action: false,
+            terminal: false,
+            confirmation: false,
+        }
     }
 
-    pub fn destructive(mut self) -> Self { self.destructive = true; self.confirmation = true; self }
-    pub fn needs_args(mut self) -> Self { self.needs_args = true; self }
-    pub fn async_action(mut self) -> Self { self.async_action = true; self }
+    pub fn destructive(mut self) -> Self {
+        self.destructive = true;
+        self.confirmation = true;
+        self
+    }
+    pub fn needs_args(mut self) -> Self {
+        self.needs_args = true;
+        self
+    }
+    pub fn async_action(mut self) -> Self {
+        self.async_action = true;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,5 +108,8 @@ impl Item {
 }
 
 pub fn action_map(actions: &[(&str, ActionCapability)]) -> HashMap<String, ActionCapability> {
-    actions.iter().map(|(name, cap)| ((*name).to_string(), cap.clone())).collect()
+    actions
+        .iter()
+        .map(|(name, cap)| ((*name).to_string(), cap.clone()))
+        .collect()
 }

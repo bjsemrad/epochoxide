@@ -4,8 +4,8 @@ mod fuzzy;
 mod history;
 mod icons;
 mod providers;
-mod service;
 mod server;
+mod service;
 mod types;
 
 use anyhow::Result;
@@ -15,7 +15,11 @@ use providers::Registry;
 use serde_json::json;
 
 #[derive(Parser)]
-#[command(name = "epochoxide", version, about = "Fast desktop shell data provider")]
+#[command(
+    name = "epochoxide",
+    version,
+    about = "Fast desktop shell data provider"
+)]
 struct Cli {
     #[arg(long)]
     config: Option<String>,
@@ -25,7 +29,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    Serve { #[arg(long)] socket: Option<String> },
+    Serve {
+        #[arg(long)]
+        socket: Option<String>,
+    },
     Query {
         #[arg(long, value_delimiter = ',')]
         providers: Vec<String>,
@@ -51,12 +58,17 @@ enum Command {
         arguments: String,
     },
     ListProviders,
-    Menu { name: String },
+    Menu {
+        name: String,
+    },
     Subscribe {
         #[arg(long, value_delimiter = ',')]
         providers: Vec<String>,
     },
-    Service { #[command(subcommand)] action: ServiceAction },
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -80,7 +92,13 @@ fn main() -> Result<()> {
             let config_path = Config::resolved_path(cli.config.as_deref());
             server::serve(&socket, config_path, move || Registry::new(config.clone()))
         }
-        Command::Query { providers, query, limit, exact, stream } => {
+        Command::Query {
+            providers,
+            query,
+            limit,
+            exact,
+            stream,
+        } => {
             if stream {
                 match client::stream_query(&config.socket, &providers, &query, limit, exact) {
                     Ok(batches) => {
@@ -90,13 +108,16 @@ fn main() -> Result<()> {
                     Err(err) => eprintln!("stream query failed, falling back: {err}"),
                 }
             }
-            if let Some(response) = client::request(&config.socket, serde_json::json!({
-                "type": "query",
-                "providers": providers.clone(),
-                "query": query.clone(),
-                "limit": limit,
-                "exact": exact,
-            }))? {
+            if let Some(response) = client::request(
+                &config.socket,
+                serde_json::json!({
+                    "type": "query",
+                    "providers": providers.clone(),
+                    "query": query.clone(),
+                    "limit": limit,
+                    "exact": exact,
+                }),
+            )? {
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 return Ok(());
             }
@@ -105,15 +126,24 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&items)?);
             Ok(())
         }
-        Command::Activate { provider, identifier, action, query, arguments } => {
-            if let Some(response) = client::request(&config.socket, serde_json::json!({
-                "type": "activate",
-                "provider": provider.clone(),
-                "identifier": identifier.clone(),
-                "action": action.clone(),
-                "query": query.clone(),
-                "arguments": arguments.clone(),
-            }))? {
+        Command::Activate {
+            provider,
+            identifier,
+            action,
+            query,
+            arguments,
+        } => {
+            if let Some(response) = client::request(
+                &config.socket,
+                serde_json::json!({
+                    "type": "activate",
+                    "provider": provider.clone(),
+                    "identifier": identifier.clone(),
+                    "action": action.clone(),
+                    "query": query.clone(),
+                    "arguments": arguments.clone(),
+                }),
+            )? {
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 return Ok(());
             }
@@ -123,7 +153,9 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::ListProviders => {
-            if let Some(response) = client::request(&config.socket, serde_json::json!({"type": "providers"}))? {
+            if let Some(response) =
+                client::request(&config.socket, serde_json::json!({"type": "providers"}))?
+            {
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 return Ok(());
             }
@@ -132,7 +164,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Menu { name } => {
-            if let Some(response) = client::request(&config.socket, serde_json::json!({"type": "menu", "menu": name.clone()}))? {
+            if let Some(response) = client::request(
+                &config.socket,
+                serde_json::json!({"type": "menu", "menu": name.clone()}),
+            )? {
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 return Ok(());
             }

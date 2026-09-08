@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// How the files provider gets its search results.
 ///
@@ -91,8 +95,13 @@ impl Default for Config {
             launch_prefix: String::new(),
             terminal_cmd: String::new(),
             clipboard_max_items: 100,
-            clipboard_image_dir: dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("epochoxide/clipboard/images").display().to_string(),
-            clipboard_text_editor: std::env::var("EDITOR").unwrap_or_else(|_| "xdg-open".to_string()),
+            clipboard_image_dir: dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("epochoxide/clipboard/images")
+                .display()
+                .to_string(),
+            clipboard_text_editor: std::env::var("EDITOR")
+                .unwrap_or_else(|_| "xdg-open".to_string()),
             clipboard_image_editor: String::new(),
             clipboard_ocr: false,
             clipboard_capture_interval_ms: 250,
@@ -102,7 +111,11 @@ impl Default for Config {
             provider_weights: default_provider_weights(),
             query_prefixes: default_query_prefixes(),
             icon_theme: String::new(),
-            icon_cache_dir: dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("epochoxide/icons").display().to_string(),
+            icon_cache_dir: dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("epochoxide/icons")
+                .display()
+                .to_string(),
             thumbnail_cache_enabled: true,
             persistent_index: true,
             file_index: FileIndex::default(),
@@ -122,31 +135,77 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let partial: PartialConfig = toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        let raw =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let partial: PartialConfig =
+            toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         let mut cfg = Self::default();
-        if let Some(v) = partial.socket { cfg.socket = v; }
-        if let Some(v) = partial.file_roots { cfg.file_roots = v; }
-        if let Some(v) = partial.ignored_dirs { cfg.ignored_dirs = v; }
-        if let Some(v) = partial.menus_dir { cfg.menus_dir = v; }
-        if let Some(v) = partial.launch_prefix { cfg.launch_prefix = v; }
-        if let Some(v) = partial.terminal_cmd { cfg.terminal_cmd = v; }
-        if let Some(v) = partial.clipboard_max_items { cfg.clipboard_max_items = v; }
-        if let Some(v) = partial.clipboard_image_dir { cfg.clipboard_image_dir = v; }
-        if let Some(v) = partial.clipboard_text_editor { cfg.clipboard_text_editor = v; }
-        if let Some(v) = partial.clipboard_image_editor { cfg.clipboard_image_editor = v; }
-        if let Some(v) = partial.clipboard_ocr { cfg.clipboard_ocr = v; }
-        if let Some(v) = partial.clipboard_capture_interval_ms { cfg.clipboard_capture_interval_ms = v; }
-        if let Some(v) = partial.runner_scan_path { cfg.runner_scan_path = v; }
-        if let Some(v) = partial.runner_commands { cfg.runner_commands = v; }
-        if let Some(v) = partial.provider_enabled { cfg.provider_enabled.extend(v); }
-        if let Some(v) = partial.provider_weights { cfg.provider_weights.extend(v); }
-        if let Some(v) = partial.query_prefixes { cfg.query_prefixes.extend(v); }
-        if let Some(v) = partial.icon_theme { cfg.icon_theme = v; }
-        if let Some(v) = partial.icon_cache_dir { cfg.icon_cache_dir = v; }
-        if let Some(v) = partial.thumbnail_cache_enabled { cfg.thumbnail_cache_enabled = v; }
-        if let Some(v) = partial.persistent_index { cfg.persistent_index = v; }
-        if let Some(v) = partial.file_index { cfg.file_index = v; }
+        if let Some(v) = partial.socket {
+            cfg.socket = v;
+        }
+        if let Some(v) = partial.file_roots {
+            cfg.file_roots = v;
+        }
+        if let Some(v) = partial.ignored_dirs {
+            cfg.ignored_dirs = v;
+        }
+        if let Some(v) = partial.menus_dir {
+            cfg.menus_dir = v;
+        }
+        if let Some(v) = partial.launch_prefix {
+            cfg.launch_prefix = v;
+        }
+        if let Some(v) = partial.terminal_cmd {
+            cfg.terminal_cmd = v;
+        }
+        if let Some(v) = partial.clipboard_max_items {
+            cfg.clipboard_max_items = v;
+        }
+        if let Some(v) = partial.clipboard_image_dir {
+            cfg.clipboard_image_dir = v;
+        }
+        if let Some(v) = partial.clipboard_text_editor {
+            cfg.clipboard_text_editor = v;
+        }
+        if let Some(v) = partial.clipboard_image_editor {
+            cfg.clipboard_image_editor = v;
+        }
+        if let Some(v) = partial.clipboard_ocr {
+            cfg.clipboard_ocr = v;
+        }
+        if let Some(v) = partial.clipboard_capture_interval_ms {
+            cfg.clipboard_capture_interval_ms = v;
+        }
+        if let Some(v) = partial.runner_scan_path {
+            cfg.runner_scan_path = v;
+        }
+        if let Some(v) = partial.runner_commands {
+            cfg.runner_commands = v;
+        }
+        if let Some(v) = partial.provider_enabled {
+            cfg.provider_enabled.extend(v);
+        }
+        if let Some(v) = partial.provider_weights {
+            cfg.provider_weights.extend(v);
+        }
+        if let Some(v) = partial.query_prefixes {
+            cfg.query_prefixes.extend(v);
+        }
+        if let Some(v) = partial.icon_theme {
+            cfg.icon_theme = v;
+        }
+        if let Some(v) = partial.icon_cache_dir {
+            cfg.icon_cache_dir = v;
+        }
+        if let Some(v) = partial.thumbnail_cache_enabled {
+            cfg.thumbnail_cache_enabled = v;
+        }
+        if let Some(v) = partial.persistent_index {
+            cfg.persistent_index = v;
+        }
+        if let Some(v) = partial.file_index {
+            cfg.file_index = v;
+        }
         cfg.expand_paths();
         Ok(cfg)
     }
@@ -170,7 +229,12 @@ fn default_config_path() -> Option<PathBuf> {
 
 fn default_socket() -> String {
     std::env::var("XDG_RUNTIME_DIR")
-        .map(|dir| PathBuf::from(dir).join("epochoxide.sock").display().to_string())
+        .map(|dir| {
+            PathBuf::from(dir)
+                .join("epochoxide.sock")
+                .display()
+                .to_string()
+        })
         .unwrap_or_else(|_| "/tmp/epochoxide.sock".to_string())
 }
 
@@ -189,21 +253,50 @@ fn default_ignored_dirs(home: &Path) -> Vec<String> {
         "dist".to_string(),
         "build".to_string(),
         ".direnv".to_string(),
-    ].into()
+    ]
+    .into()
 }
 
 fn default_provider_enabled() -> HashMap<String, bool> {
-    ["apps", "files", "runner", "clipboard", "windows", "calc", "menus"].into_iter().map(|p| (p.to_string(), true)).collect()
+    [
+        "apps",
+        "files",
+        "runner",
+        "clipboard",
+        "windows",
+        "calc",
+        "menus",
+    ]
+    .into_iter()
+    .map(|p| (p.to_string(), true))
+    .collect()
 }
 
 fn default_provider_weights() -> HashMap<String, i32> {
-    [("apps", 20_000), ("runner", 12_000), ("calc", 10_000), ("windows", 6_000), ("files", 0), ("clipboard", 0)]
-        .into_iter().map(|(p, w)| (p.to_string(), w)).collect()
+    [
+        ("apps", 20_000),
+        ("runner", 12_000),
+        ("calc", 10_000),
+        ("windows", 6_000),
+        ("files", 0),
+        ("clipboard", 0),
+    ]
+    .into_iter()
+    .map(|(p, w)| (p.to_string(), w))
+    .collect()
 }
 
 /// Menus get no default prefix: each one registers under its own name, so a shortcut for it is a
 /// `"?" = "keybinds"` line the user adds here alongside the built-in providers.
 fn default_query_prefixes() -> HashMap<String, String> {
-    [(">", "runner"), ("/", "files"), ("#", "clipboard"), ("@", "windows"), ("=", "calc")]
-        .into_iter().map(|(prefix, provider)| (prefix.to_string(), provider.to_string())).collect()
+    [
+        (">", "runner"),
+        ("/", "files"),
+        ("#", "clipboard"),
+        ("@", "windows"),
+        ("=", "calc"),
+    ]
+    .into_iter()
+    .map(|(prefix, provider)| (prefix.to_string(), provider.to_string()))
+    .collect()
 }

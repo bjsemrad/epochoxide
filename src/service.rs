@@ -47,7 +47,10 @@ pub fn systemctl(args: &[&str]) -> Result<()> {
 }
 
 fn quote_systemd_arg(arg: &str) -> String {
-    if arg.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b':' | b'@')) {
+    if arg
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b':' | b'@'))
+    {
         arg.to_string()
     } else {
         format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))

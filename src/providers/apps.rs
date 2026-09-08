@@ -1,8 +1,16 @@
 use super::{run_shell, Provider};
-use crate::{config::Config, fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
+use crate::{
+    config::Config,
+    fuzzy,
+    types::{action_map, ActionCapability, Item, ProviderCapability},
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct DesktopEntry {
@@ -32,8 +40,16 @@ pub struct AppsProvider {
 
 impl AppsProvider {
     pub fn new(config: Config) -> Result<Self> {
-        let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().split(':').map(str::to_string).collect();
-        let mut this = Self { config, apps: Vec::new(), desktops };
+        let desktops = std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .split(':')
+            .map(str::to_string)
+            .collect();
+        let mut this = Self {
+            config,
+            apps: Vec::new(),
+            desktops,
+        };
         this.reload()?;
         Ok(this)
     }
@@ -43,11 +59,18 @@ impl AppsProvider {
         let mut seen = std::collections::HashSet::new();
 
         for dir in application_dirs() {
-            if !dir.exists() { continue; }
-            for entry in walkdir::WalkDir::new(&dir).follow_links(true).into_iter().filter_map(|e| e.ok()) {
+            if !dir.exists() {
+                continue;
+            }
+            for entry in walkdir::WalkDir::new(&dir)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
                 if entry.path().extension().and_then(|e| e.to_str()) == Some("desktop") {
                     if let Ok(app) = parse_desktop(entry.path()) {
-                        if !app.name.is_empty() && self.visible(&app) && seen.insert(app.id.clone()) {
+                        if !app.name.is_empty() && self.visible(&app) && seen.insert(app.id.clone())
+                        {
                             self.apps.push(app);
                         }
                     }
@@ -58,31 +81,57 @@ impl AppsProvider {
     }
 
     fn visible(&self, app: &DesktopEntry) -> bool {
-        if app.hidden || app.no_display { return false; }
-        if !app.only_show_in.is_empty() && !app.only_show_in.iter().any(|d| self.desktops.contains(d)) { return false; }
-        if app.not_show_in.iter().any(|d| self.desktops.contains(d)) { return false; }
+        if app.hidden || app.no_display {
+            return false;
+        }
+        if !app.only_show_in.is_empty()
+            && !app.only_show_in.iter().any(|d| self.desktops.contains(d))
+        {
+            return false;
+        }
+        if app.not_show_in.iter().any(|d| self.desktops.contains(d)) {
+            return false;
+        }
         true
     }
 
     pub fn wm_class_icons(&self) -> HashMap<String, String> {
-        self.apps.iter().filter(|app| !app.icon.is_empty()).map(|app| {
-            let key = if !app.startup_wm_class.is_empty() { app.startup_wm_class.clone() } else { app.id.trim_end_matches(".desktop").to_string() };
-            (key.to_lowercase(), app.icon.clone())
-        }).collect()
+        self.apps
+            .iter()
+            .filter(|app| !app.icon.is_empty())
+            .map(|app| {
+                let key = if !app.startup_wm_class.is_empty() {
+                    app.startup_wm_class.clone()
+                } else {
+                    app.id.trim_end_matches(".desktop").to_string()
+                };
+                (key.to_lowercase(), app.icon.clone())
+            })
+            .collect()
     }
 }
 
 impl Provider for AppsProvider {
-    fn name(&self) -> &str { "apps" }
-    fn pretty_name(&self) -> &str { "Desktop Applications" }
+    fn name(&self) -> &str {
+        "apps"
+    }
+    fn pretty_name(&self) -> &str {
+        "Desktop Applications"
+    }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         let query_lower = query.to_lowercase();
         let mut items = Vec::new();
         for app in &self.apps {
-            if let Some((score, info)) = fuzzy::score_lower(&query_lower, &app.search, exact, "text") {
+            if let Some((score, info)) =
+                fuzzy::score_lower(&query_lower, &app.search, exact, "text")
+            {
                 let mut item = Item::new(self.name(), &app.id, &app.name);
-                item.subtext = if app.generic_name.is_empty() { app.comment.clone() } else { app.generic_name.clone() };
+                item.subtext = if app.generic_name.is_empty() {
+                    app.comment.clone()
+                } else {
+                    app.generic_name.clone()
+                };
                 item.icon = app.icon.clone();
                 item.actions = vec!["open".into()];
                 item.score = score + 20_000 + app_name_bonus(&query_lower, &app.name);
@@ -90,9 +139,15 @@ impl Provider for AppsProvider {
                 items.push(item);
             }
             for action in app.actions.keys() {
-                if query.is_empty() { continue; }
+                if query.is_empty() {
+                    continue;
+                }
                 if let Some((score, info)) = fuzzy::score(query, action, exact, "text") {
-                    let mut item = Item::new(self.name(), format!("{}:{action}", app.id), format!("{}: {action}", app.name));
+                    let mut item = Item::new(
+                        self.name(),
+                        format!("{}:{action}", app.id),
+                        format!("{}: {action}", app.name),
+                    );
                     item.icon = app.icon.clone();
                     item.actions = vec!["open".into()];
                     item.score = score + 10_000;
@@ -106,12 +161,32 @@ impl Provider for AppsProvider {
         items
     }
 
-    fn activate(&mut self, identifier: &str, action: &str, _query: &str, _arguments: &str) -> Result<()> {
-        if action != "open" { anyhow::bail!("unsupported apps action: {action}"); }
-        let (id, desktop_action) = identifier.split_once(':').map_or((identifier, None), |(id, a)| (id, Some(a)));
-        let app = self.apps.iter().find(|a| a.id == id).context("app not found")?;
-        let exec = desktop_action.and_then(|a| app.actions.get(a)).unwrap_or(&app.exec);
-        let command = if self.config.launch_prefix.is_empty() { exec.clone() } else { format!("{} {}", self.config.launch_prefix, exec) };
+    fn activate(
+        &mut self,
+        identifier: &str,
+        action: &str,
+        _query: &str,
+        _arguments: &str,
+    ) -> Result<()> {
+        if action != "open" {
+            anyhow::bail!("unsupported apps action: {action}");
+        }
+        let (id, desktop_action) = identifier
+            .split_once(':')
+            .map_or((identifier, None), |(id, a)| (id, Some(a)));
+        let app = self
+            .apps
+            .iter()
+            .find(|a| a.id == id)
+            .context("app not found")?;
+        let exec = desktop_action
+            .and_then(|a| app.actions.get(a))
+            .unwrap_or(&app.exec);
+        let command = if self.config.launch_prefix.is_empty() {
+            exec.clone()
+        } else {
+            format!("{} {}", self.config.launch_prefix, exec)
+        };
         run_shell(&command)
     }
 
@@ -139,49 +214,97 @@ impl Provider for AppsProvider {
 /// unconditionally for that case; missing ones are skipped.
 fn application_dirs() -> Vec<PathBuf> {
     let mut bases = Vec::new();
-    if let Some(data_home) = dirs::data_dir() { bases.push(data_home); }
+    if let Some(data_home) = dirs::data_dir() {
+        bases.push(data_home);
+    }
     if let Ok(data_dirs) = std::env::var("XDG_DATA_DIRS") {
-        bases.extend(data_dirs.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+        bases.extend(
+            data_dirs
+                .split(':')
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from),
+        );
     }
     if let Some(home) = dirs::home_dir() {
         bases.push(home.join(".nix-profile/share"));
         if let Some(user) = home.file_name() {
-            bases.push(PathBuf::from("/etc/profiles/per-user").join(user).join("share"));
+            bases.push(
+                PathBuf::from("/etc/profiles/per-user")
+                    .join(user)
+                    .join("share"),
+            );
         }
     }
-    bases.extend([
-        "/run/current-system/sw/share",
-        "/nix/var/nix/profiles/default/share",
-        "/usr/local/share",
-        "/usr/share",
-    ].map(PathBuf::from));
+    bases.extend(
+        [
+            "/run/current-system/sw/share",
+            "/nix/var/nix/profiles/default/share",
+            "/usr/local/share",
+            "/usr/share",
+        ]
+        .map(PathBuf::from),
+    );
 
     let mut seen = std::collections::HashSet::new();
-    bases.into_iter().map(|base| base.join("applications")).filter(|dir| seen.insert(dir.clone()) && dir.exists()).collect()
+    bases
+        .into_iter()
+        .map(|base| base.join("applications"))
+        .filter(|dir| seen.insert(dir.clone()) && dir.exists())
+        .collect()
 }
 
 fn app_name_bonus(query_lower: &str, name: &str) -> i32 {
-    if query_lower.is_empty() { return 0; }
+    if query_lower.is_empty() {
+        return 0;
+    }
     let name_lower = name.to_lowercase();
-    let Some(start) = name_lower.find(query_lower) else { return 0; };
+    let Some(start) = name_lower.find(query_lower) else {
+        return 0;
+    };
     15_000 + if start == 0 { 5_000 } else { 0 }
 }
 
 fn parse_desktop(path: &Path) -> Result<DesktopEntry> {
     let raw = fs::read_to_string(path)?;
-    let mut app = DesktopEntry { id: path.file_name().unwrap_or_default().to_string_lossy().to_string(), ..Default::default() };
+    let mut app = DesktopEntry {
+        id: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        ..Default::default()
+    };
     let mut in_entry = false;
     let mut current_action: Option<String> = None;
     for line in raw.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') { continue; }
-        if line == "[Desktop Entry]" { in_entry = true; current_action = None; continue; }
-        if let Some(name) = line.strip_prefix("[Desktop Action ").and_then(|s| s.strip_suffix(']')) { current_action = Some(name.to_string()); in_entry = false; continue; }
-        let Some((key, val)) = line.split_once('=') else { continue; };
-        if let Some(action) = &current_action {
-            if key == "Exec" { app.actions.insert(action.clone(), clean_exec(val)); }
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if !in_entry { continue; }
+        if line == "[Desktop Entry]" {
+            in_entry = true;
+            current_action = None;
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix("[Desktop Action ")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            current_action = Some(name.to_string());
+            in_entry = false;
+            continue;
+        }
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        if let Some(action) = &current_action {
+            if key == "Exec" {
+                app.actions.insert(action.clone(), clean_exec(val));
+            }
+            continue;
+        }
+        if !in_entry {
+            continue;
+        }
         match key {
             "Name" if app.name.is_empty() => app.name = val.to_string(),
             "GenericName" if app.generic_name.is_empty() => app.generic_name = val.to_string(),
@@ -199,21 +322,38 @@ fn parse_desktop(path: &Path) -> Result<DesktopEntry> {
             _ => {}
         }
     }
-    app.search = format!("{} {} {} {}", app.name, app.generic_name, app.comment, app.keywords.join(" ")).to_lowercase();
+    app.search = format!(
+        "{} {} {} {}",
+        app.name,
+        app.generic_name,
+        app.comment,
+        app.keywords.join(" ")
+    )
+    .to_lowercase();
     Ok(app)
 }
 
 fn clean_exec(input: &str) -> String {
-    const CODES: [&str; 15] = ["%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i", "%c", "%k", "%v", "%m", "%%", "%" ];
+    const CODES: [&str; 15] = [
+        "%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i", "%c", "%k", "%v", "%m", "%%", "%",
+    ];
     const FLATPAK_FILE_FORWARDING: [&str; 4] = ["@@u", "@@U", "@@", "@@@"];
     let mut out = input.to_string();
-    for code in CODES { out = out.replace(code, ""); }
-    for marker in FLATPAK_FILE_FORWARDING { out = out.replace(marker, ""); }
+    for code in CODES {
+        out = out.replace(code, "");
+    }
+    for marker in FLATPAK_FILE_FORWARDING {
+        out = out.replace(marker, "");
+    }
     out.trim().to_string()
 }
 
 fn split_list(value: &str) -> Vec<String> {
-    value.split(';').filter(|s| !s.is_empty()).map(str::to_string).collect()
+    value
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -248,7 +388,11 @@ mod tests {
     fn parses_startup_wm_class() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("firefox.desktop");
-        std::fs::write(&path, "[Desktop Entry]\nName=Firefox\nIcon=firefox\nStartupWMClass=firefox\n").unwrap();
+        std::fs::write(
+            &path,
+            "[Desktop Entry]\nName=Firefox\nIcon=firefox\nStartupWMClass=firefox\n",
+        )
+        .unwrap();
         let app = parse_desktop(&path).unwrap();
         assert_eq!(app.startup_wm_class, "firefox");
     }
@@ -258,8 +402,17 @@ mod tests {
         let provider = AppsProvider {
             config: Config::default(),
             apps: vec![
-                DesktopEntry { id: "org.foo.Bar.desktop".into(), startup_wm_class: "foobar".into(), icon: "foo-icon".into(), ..Default::default() },
-                DesktopEntry { id: "baz.desktop".into(), icon: "baz-icon".into(), ..Default::default() },
+                DesktopEntry {
+                    id: "org.foo.Bar.desktop".into(),
+                    startup_wm_class: "foobar".into(),
+                    icon: "foo-icon".into(),
+                    ..Default::default()
+                },
+                DesktopEntry {
+                    id: "baz.desktop".into(),
+                    icon: "baz-icon".into(),
+                    ..Default::default()
+                },
             ],
             desktops: Vec::new(),
         };
@@ -284,7 +437,8 @@ mod tests {
         std::fs::write(&second, "[Desktop Entry]\nName=Ghostty\nExec=ghostty\n").unwrap();
 
         let mut seen = std::collections::HashSet::new();
-        let apps = [first, second].into_iter()
+        let apps = [first, second]
+            .into_iter()
             .filter_map(|path| parse_desktop(&path).ok())
             .filter(|app| seen.insert(app.id.clone()))
             .collect::<Vec<_>>();

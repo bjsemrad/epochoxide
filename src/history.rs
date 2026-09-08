@@ -1,7 +1,12 @@
 use crate::types::Item;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct UsageEntry {
@@ -17,14 +22,21 @@ pub struct UsageHistory {
 
 impl UsageHistory {
     pub fn load() -> Self {
-        let path = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("epochoxide/history.json");
-        let entries = fs::read_to_string(&path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+        let path = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("epochoxide/history.json");
+        let entries = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
         Self { entries, path }
     }
 
     pub fn apply(&self, item: &mut Item, query: &str) {
         let key = key(&item.provider, &item.identifier);
-        let Some(entry) = self.entries.get(&key) else { return; };
+        let Some(entry) = self.entries.get(&key) else {
+            return;
+        };
         let count_bonus = (entry.count.min(50) as i32) * 250;
         let recency_bonus = recency_bonus(entry.last_used_epoch);
         let query_bonus = if !query.is_empty() { 500 } else { 0 };
@@ -40,16 +52,23 @@ impl UsageHistory {
     }
 
     fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(&self.path, serde_json::to_vec(&self.entries)?)?;
         Ok(())
     }
 }
 
-fn key(provider: &str, identifier: &str) -> String { format!("{provider}:{identifier}") }
+fn key(provider: &str, identifier: &str) -> String {
+    format!("{provider}:{identifier}")
+}
 
 fn now_epoch() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
 }
 
 fn recency_bonus(last_used_epoch: u64) -> i32 {

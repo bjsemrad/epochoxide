@@ -1,5 +1,9 @@
 use super::{run_shell, Provider};
-use crate::{config::{Config, RunnerCommand}, fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
+use crate::{
+    config::{Config, RunnerCommand},
+    fuzzy,
+    types::{action_map, ActionCapability, Item, ProviderCapability},
+};
 use anyhow::{Context, Result};
 use std::{collections::HashSet, fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
@@ -21,7 +25,10 @@ pub struct RunnerProvider {
 
 impl RunnerProvider {
     pub fn new(config: Config) -> Self {
-        let mut this = Self { config, commands: Vec::new() };
+        let mut this = Self {
+            config,
+            commands: Vec::new(),
+        };
         this.reindex();
         this
     }
@@ -29,12 +36,16 @@ impl RunnerProvider {
     fn reindex(&mut self) {
         self.commands.clear();
         self.add_custom_commands();
-        if self.config.runner_scan_path { self.add_path_commands(); }
+        if self.config.runner_scan_path {
+            self.add_path_commands();
+        }
     }
 
     fn add_custom_commands(&mut self) {
         for command in &self.config.runner_commands {
-            if command.name.is_empty() || command.command.is_empty() { continue; }
+            if command.name.is_empty() || command.command.is_empty() {
+                continue;
+            }
             self.commands.push(entry_from_custom(command));
         }
     }
@@ -43,12 +54,24 @@ impl RunnerProvider {
         let mut seen = HashSet::new();
         let path = std::env::var_os("PATH").unwrap_or_default();
         for dir in std::env::split_paths(&path) {
-            let Ok(entries) = fs::read_dir(dir) else { continue; };
+            let Ok(entries) = fs::read_dir(dir) else {
+                continue;
+            };
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
-                if !is_executable_file(&path) { continue; }
-                let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue; };
-                if !seen.insert(name.clone()) { continue; }
+                if !is_executable_file(&path) {
+                    continue;
+                }
+                let Some(name) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
                 let command = path.display().to_string();
                 self.commands.push(CommandEntry {
                     id: format!("path:{name}"),
@@ -65,20 +88,30 @@ impl RunnerProvider {
 }
 
 impl Provider for RunnerProvider {
-    fn name(&self) -> &str { "runner" }
-    fn pretty_name(&self) -> &str { "Runner" }
+    fn name(&self) -> &str {
+        "runner"
+    }
+    fn pretty_name(&self) -> &str {
+        "Runner"
+    }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         let query_lower = query.to_lowercase();
         let mut out = Vec::new();
         for command in &self.commands {
-            if let Some((score, info)) = fuzzy::score_lower(&query_lower, &command.search, exact, "text") {
+            if let Some((score, info)) =
+                fuzzy::score_lower(&query_lower, &command.search, exact, "text")
+            {
                 let mut item = Item::new(self.name(), &command.id, &command.name);
                 item.subtext = command.command.clone();
                 item.icon = command.icon.clone();
                 item.actions = vec!["run".into()];
-                if command.terminal { item.state.push("terminal".into()); }
-                if command.custom { item.state.push("custom".into()); }
+                if command.terminal {
+                    item.state.push("terminal".into());
+                }
+                if command.custom {
+                    item.state.push("custom".into());
+                }
                 item.score = score + if command.custom { 15_000 } else { 1_000 };
                 item.fuzzyinfo = Some(info);
                 out.push(item);
@@ -89,17 +122,30 @@ impl Provider for RunnerProvider {
         out
     }
 
-    fn activate(&mut self, identifier: &str, action: &str, _query: &str, arguments: &str) -> Result<()> {
+    fn activate(
+        &mut self,
+        identifier: &str,
+        action: &str,
+        _query: &str,
+        arguments: &str,
+    ) -> Result<()> {
         match action {
             "run" => {
-                let command = self.commands.iter().find(|c| c.id == identifier).context("runner command not found")?;
+                let command = self
+                    .commands
+                    .iter()
+                    .find(|c| c.id == identifier)
+                    .context("runner command not found")?;
                 let mut run = command.command.replace("%ARGS%", arguments);
                 if command.terminal && !self.config.terminal_cmd.is_empty() {
                     run = self.config.terminal_cmd.replace("%COMMAND%", &run);
                 }
                 run_shell(&run)
             }
-            "reindex" => { self.reindex(); Ok(()) }
+            "reindex" => {
+                self.reindex();
+                Ok(())
+            }
             _ => anyhow::bail!("unsupported runner action: {action}"),
         }
     }
@@ -125,7 +171,13 @@ impl Provider for RunnerProvider {
 }
 
 fn entry_from_custom(command: &RunnerCommand) -> CommandEntry {
-    let search = format!("{} {} {}", command.name, command.command, command.keywords.join(" ")).to_lowercase();
+    let search = format!(
+        "{} {} {}",
+        command.name,
+        command.command,
+        command.keywords.join(" ")
+    )
+    .to_lowercase();
     CommandEntry {
         id: format!("custom:{}", command.name),
         name: command.name.clone(),
@@ -138,7 +190,9 @@ fn entry_from_custom(command: &RunnerCommand) -> CommandEntry {
 }
 
 fn is_executable_file(path: &PathBuf) -> bool {
-    let Ok(meta) = fs::metadata(path) else { return false; };
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
     meta.is_file() && meta.permissions().mode() & 0o111 != 0
 }
 
@@ -149,7 +203,13 @@ mod tests {
 
     #[test]
     fn custom_command_search_includes_keywords() {
-        let entry = entry_from_custom(&RunnerCommand { name: "Docs".into(), command: "xdg-open https://example.com".into(), keywords: vec!["help".into()], icon: None, terminal: false });
+        let entry = entry_from_custom(&RunnerCommand {
+            name: "Docs".into(),
+            command: "xdg-open https://example.com".into(),
+            keywords: vec!["help".into()],
+            icon: None,
+            terminal: false,
+        });
         assert!(entry.search.contains("help"));
     }
 }
