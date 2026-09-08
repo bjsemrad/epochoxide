@@ -318,7 +318,8 @@ See `config.example.toml` for a starter file.
 Menu files are TOML files placed in `menus_dir`. Each becomes its own provider: `name` is the
 provider name a prefix points at, `name_pretty`, `description` and `icon` are how it presents
 itself in a launcher's provider list, and `icon` is also the fallback icon for entries that do not
-carry one.
+carry one. Icons are passed through as written, so what a name may be is the launcher's business:
+EpochShell resolves freedesktop names against the icon theme and also draws a Nerd Font glyph.
 
 Example:
 
@@ -371,7 +372,7 @@ copy = "¯\\_(ツ)_/¯"
 | `subtext` | Second line. Defaults to `copy`, then `value`, then the keywords. |
 | `value` | Substituted into `action` as `%VALUE%`. Defaults to `text`. |
 | `copy` | Enter copies this instead of running anything. |
-| `icon` | Falls back to the menu's `icon`. |
+| `icon` | Icon name for the launcher to resolve. Falls back to the menu's `icon`. |
 | `keywords` | Extra words the entry matches on. |
 | `actions` | Per-entry `name = "command"` map, overriding the menu's `action`/`actions`. |
 | `async` | Command whose output becomes the entry's preview. |
