@@ -363,18 +363,60 @@ text = "Shrug"
 copy = "¯\\_(ツ)_/¯"
 ```
 
-`command` replaces `entries` with a generator: any program emitting the same entries as a JSON
-array. Its output is cached briefly so a generator that shells out is not re-run per keystroke.
+### Entry fields
+
+| Field | Meaning |
+|-------|---------|
+| `text` | What the entry is called. Required. |
+| `subtext` | Second line. Defaults to `copy`, then `value`, then the keywords. |
+| `value` | Substituted into `action` as `%VALUE%`. Defaults to `text`. |
+| `copy` | Enter copies this instead of running anything. |
+| `icon` | Falls back to the menu's `icon`. |
+| `keywords` | Extra words the entry matches on. |
+| `actions` | Per-entry `name = "command"` map, overriding the menu's `action`/`actions`. |
+| `async` | Command whose output becomes the entry's preview. |
+
+`%ARGS%` in a command is replaced with arguments the client passed to the activation.
+
+### Dynamic menus
+
+`command` replaces `entries` with a generator: any program that prints those same entries as a
+JSON array. It is what makes a menu reflect live state rather than a list written by hand — the
+keybinds menu below asks the running compositor for its binds every time it is opened.
 
 ```toml
 name = "keybinds"
 name_pretty = "Keybinds"
+description = "Search the keybinds of the running compositor"
 icon = "input-keyboard"
 action = "%VALUE%"
 command = "~/.config/epochoxide/menus/keybinds.sh"
 ```
 
-Run:
+```json
+[
+  {"text": "Close window", "subtext": "SUPER+Q", "icon": "input-keyboard",
+   "value": "hyprctl repl 'hl.dispatch(hl.dsp.window.close())'", "keywords": ["window"]},
+  {"text": "Run: ghostty", "subtext": "SUPER+Return", "icon": "input-keyboard",
+   "value": "ghostty", "keywords": []}
+]
+```
+
+Generators are run through `sh -c` by the daemon, so they inherit the daemon's environment and
+PATH — under the Home Manager service that means `runtimePackages` plus the system and user
+profiles. A generator that needs a tool no launcher can be assumed to have should bring it itself.
+
+Because a generator can be slow (the keybinds one shells out to the compositor and takes seconds),
+its output is generated once in the background at startup and then kept:
+
+- opening the menu regenerates it, behind the answer already on screen, so what is shown is at
+  most one open old and the user never waits;
+- searching within the menu reuses what that generation returned rather than re-running it per
+  keystroke;
+- `cache_ms` sets how long that result stands before a search also triggers a regeneration
+  (default 10000).
+
+Run a menu directly, whatever its source:
 
 ```bash
 epochoxide menu bookmarks
