@@ -19,6 +19,7 @@ struct DesktopEntry {
     terminal: bool,
     only_show_in: Vec<String>,
     not_show_in: Vec<String>,
+    startup_wm_class: String,
     actions: HashMap<String, String>,
     search: String,
 }
@@ -67,6 +68,13 @@ impl AppsProvider {
         if !app.only_show_in.is_empty() && !app.only_show_in.iter().any(|d| self.desktops.contains(d)) { return false; }
         if app.not_show_in.iter().any(|d| self.desktops.contains(d)) { return false; }
         true
+    }
+
+    pub fn wm_class_icons(&self) -> HashMap<String, String> {
+        self.apps.iter().filter(|app| !app.icon.is_empty()).map(|app| {
+            let key = if !app.startup_wm_class.is_empty() { app.startup_wm_class.clone() } else { app.id.trim_end_matches(".desktop").to_string() };
+            (key.to_lowercase(), app.icon.clone())
+        }).collect()
     }
 }
 
@@ -156,6 +164,7 @@ fn parse_desktop(path: &Path) -> Result<DesktopEntry> {
             "Terminal" => app.terminal = val.eq_ignore_ascii_case("true"),
             "OnlyShowIn" => app.only_show_in = split_list(val),
             "NotShowIn" => app.not_show_in = split_list(val),
+            "StartupWMClass" => app.startup_wm_class = val.to_string(),
             _ => {}
         }
     }
@@ -176,10 +185,35 @@ fn split_list(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::clean_exec;
+    use super::{clean_exec, parse_desktop, AppsProvider, DesktopEntry};
+    use crate::config::Config;
 
     #[test]
     fn removes_desktop_exec_field_codes() {
         assert_eq!(clean_exec("firefox %u"), "firefox");
+    }
+
+    #[test]
+    fn parses_startup_wm_class() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("firefox.desktop");
+        std::fs::write(&path, "[Desktop Entry]\nName=Firefox\nIcon=firefox\nStartupWMClass=firefox\n").unwrap();
+        let app = parse_desktop(&path).unwrap();
+        assert_eq!(app.startup_wm_class, "firefox");
+    }
+
+    #[test]
+    fn wm_class_icons_prefers_startup_wm_class_over_id() {
+        let provider = AppsProvider {
+            config: Config::default(),
+            apps: vec![
+                DesktopEntry { id: "org.foo.Bar.desktop".into(), startup_wm_class: "foobar".into(), icon: "foo-icon".into(), ..Default::default() },
+                DesktopEntry { id: "baz.desktop".into(), icon: "baz-icon".into(), ..Default::default() },
+            ],
+            desktops: Vec::new(),
+        };
+        let icons = provider.wm_class_icons();
+        assert_eq!(icons.get("foobar"), Some(&"foo-icon".to_string()));
+        assert_eq!(icons.get("baz"), Some(&"baz-icon".to_string()));
     }
 }

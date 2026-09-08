@@ -39,21 +39,28 @@ pub struct Registry {
     capabilities: Vec<ProviderCapability>,
     history: Arc<RwLock<UsageHistory>>,
     config: Arc<Config>,
+    icons: Arc<icons::IconResolver>,
 }
 
 impl Registry {
     pub fn new(config: Config) -> Result<Self> {
         let mut providers: Vec<Box<dyn Provider>> = Vec::new();
-        if enabled(&config, "apps") { providers.push(Box::new(apps::AppsProvider::new(config.clone())?)); }
+        let mut wm_class_icons = std::collections::HashMap::new();
+        if enabled(&config, "apps") {
+            let apps = apps::AppsProvider::new(config.clone())?;
+            wm_class_icons = apps.wm_class_icons();
+            providers.push(Box::new(apps));
+        }
         if enabled(&config, "files") { providers.push(Box::new(files::FilesProvider::new(config.clone()))); }
         if enabled(&config, "runner") { providers.push(Box::new(runner::RunnerProvider::new(config.clone()))); }
         if enabled(&config, "clipboard") { providers.push(Box::new(clipboard::ClipboardProvider::new(config.clone())?)); }
-        if enabled(&config, "windows") { providers.push(Box::new(windows::WindowsProvider::new())); }
+        if enabled(&config, "windows") { providers.push(Box::new(windows::WindowsProvider::new(wm_class_icons))); }
         if enabled(&config, "calc") { providers.push(Box::new(calc::CalcProvider::new(config.clone()))); }
         if enabled(&config, "menus") { providers.push(Box::new(menus::MenusProvider::new(config.clone())?)); }
         let capabilities = providers.iter().map(|p| p.capability()).collect();
+        let icons = Arc::new(icons::IconResolver::new(&config));
         let providers = providers.into_iter().map(|p| Arc::new(Mutex::new(p))).collect();
-        Ok(Self { providers, capabilities, history: Arc::new(RwLock::new(UsageHistory::load())), config: Arc::new(config) })
+        Ok(Self { providers, capabilities, history: Arc::new(RwLock::new(UsageHistory::load())), config: Arc::new(config), icons })
     }
 
     pub fn providers(&self) -> Vec<ProviderCapability> {
@@ -95,8 +102,8 @@ impl Registry {
         out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.text.cmp(&b.text)));
         out.truncate(limit);
         for item in &mut out {
-            let icon_path = icons::resolve(&item.icon, &self.config);
-            item.icon_path = icon_path.as_deref().map(str::to_string);
+            let icon_path = self.icons.resolve(&item.icon);
+            item.icon_path = icon_path.clone();
             if let Some(ref p) = icon_path { item.thumbnail = icons::thumbnail(p, &self.config); }
         }
         out
@@ -127,6 +134,7 @@ impl Registry {
             let provider = Arc::clone(&self.providers[i]);
             let history = Arc::clone(&self.history);
             let config = Arc::clone(&self.config);
+            let icons = Arc::clone(&self.icons);
             let name = self.capabilities[i].name.clone();
             let weight = self.config.provider_weights.get(&name).copied().unwrap_or_default();
             let tx = tx.clone();
@@ -143,8 +151,8 @@ impl Registry {
                 items.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.text.cmp(&b.text)));
                 items.truncate(limit);
                 for item in &mut items {
-                    let icon_path = icons::resolve(&item.icon, &config);
-                    item.icon_path = icon_path.as_deref().map(str::to_string);
+                    let icon_path = icons.resolve(&item.icon);
+                    item.icon_path = icon_path.clone();
                     if let Some(ref p) = icon_path { item.thumbnail = icons::thumbnail(p, &config); }
                 }
                 let _ = tx.send((name, items));

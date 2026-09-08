@@ -2,10 +2,13 @@ use super::{command_output, run_shell, Provider};
 use crate::{fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
 use anyhow::Result;
 use serde::Deserialize;
+use std::collections::HashMap;
 
-pub struct WindowsProvider;
+pub struct WindowsProvider { wm_class_icons: HashMap<String, String> }
 
-impl WindowsProvider { pub fn new() -> Self { Self } }
+impl WindowsProvider {
+    pub fn new(wm_class_icons: HashMap<String, String>) -> Self { Self { wm_class_icons } }
+}
 
 #[derive(Debug, Deserialize)]
 struct HyprClient { address: String, title: String, class: String, workspace: HyprWorkspace }
@@ -31,8 +34,8 @@ impl Provider for WindowsProvider {
             if let Some((score, info)) = fuzzy::score(query, &haystack, exact, "text") {
                 let mut item = Item::new(self.name(), format!("{}:{}", window.backend, window.id), window.title);
                 item.subtext = format!("{} {}", window.app, window.workspace).trim().to_string();
-                item.icon = "preferences-system-windows".into();
-                item.actions = vec!["focus".into()];
+                item.icon = self.wm_class_icons.get(&window.app.to_lowercase()).cloned().unwrap_or_else(|| "preferences-system-windows".into());
+                item.actions = vec!["focus".into(), "close".into()];
                 item.score = score + 5_000;
                 item.fuzzyinfo = Some(info);
                 out.push(item);
@@ -43,14 +46,17 @@ impl Provider for WindowsProvider {
     }
 
     fn activate(&mut self, identifier: &str, action: &str, _query: &str, _arguments: &str) -> Result<()> {
-        if action != "focus" { anyhow::bail!("unsupported windows action: {action}"); }
         let Some((backend, id)) = identifier.split_once(':') else { return Ok(()); };
-        match backend {
-            "hypr" => run_shell(&format!("hyprctl dispatch focuswindow address:{id}")),
-            "sway" => run_shell(&format!("swaymsg '[con_id={id}] focus'")),
-            "niri" => run_shell(&format!("niri msg action focus-window --id {id}")),
-            "wmctrl" => run_shell(&format!("wmctrl -ia {id}")),
-            _ => Ok(()),
+        match (action, backend) {
+            ("focus", "hypr") => run_shell(&format!("hyprctl dispatch focuswindow address:{id}")),
+            ("focus", "sway") => run_shell(&format!("swaymsg '[con_id={id}] focus'")),
+            ("focus", "niri") => run_shell(&format!("niri msg action focus-window --id {id}")),
+            ("focus", "wmctrl") => run_shell(&format!("wmctrl -ia {id}")),
+            ("close", "hypr") => run_shell(&format!("hyprctl dispatch closewindow address:{id}")),
+            ("close", "sway") => run_shell(&format!("swaymsg '[con_id={id}] kill'")),
+            ("close", "niri") => run_shell(&format!("niri msg action close-window --id {id}")),
+            ("close", "wmctrl") => run_shell(&format!("wmctrl -ic {id}")),
+            _ => anyhow::bail!("unsupported windows action: {action}"),
         }
     }
 
@@ -58,9 +64,12 @@ impl Provider for WindowsProvider {
         ProviderCapability {
             name: self.name().into(),
             name_pretty: self.pretty_name().into(),
-            description: "Search and focus open windows".into(),
+            description: "Search, focus, and close open windows".into(),
             prefixes: Vec::new(),
-            actions: action_map(&[("focus", ActionCapability::new("Focus"))]),
+            actions: action_map(&[
+                ("focus", ActionCapability::new("Focus")),
+                ("close", ActionCapability::new("Close").destructive()),
+            ]),
             supports_query: true,
             supports_activate: true,
             supports_streaming: true,

@@ -2,7 +2,7 @@ use crate::providers::Registry;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{fs, io::{BufRead, BufReader, Write}, os::unix::net::{UnixListener, UnixStream}, path::Path, sync::{Arc, Condvar, Mutex}, thread, time::Duration};
+use std::{fs, io::{BufRead, BufReader, Write}, os::unix::net::{UnixListener, UnixStream}, path::Path, sync::{mpsc, Arc, Condvar, Mutex}, thread, time::Duration};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -72,10 +72,28 @@ impl Startup {
 
 fn handle_client(mut stream: UnixStream, startup: Arc<Startup>) -> Result<()> {
     let reader = BufReader::new(stream.try_clone()?);
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() { continue; }
-        let response = match serde_json::from_str::<Request>(&line) {
+    let (tx, rx) = mpsc::channel::<Result<Request, String>>();
+    thread::spawn(move || {
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() { continue; }
+            if tx.send(serde_json::from_str::<Request>(&line).map_err(|e| e.to_string())).is_err() { break; }
+        }
+    });
+
+    let mut lookahead = None;
+    while let Some(mut request) = lookahead.take().or_else(|| rx.recv().ok()) {
+        // A burst of Query requests (fast typing outrunning processing) collapses to the
+        // newest one — the rest are dropped before doing any work. Other request kinds
+        // (Activate, Menu, ...) are never dropped and always run in order.
+        while matches!(request, Ok(Request::Query { .. })) {
+            match rx.try_recv() {
+                Ok(next @ Ok(Request::Query { .. })) => request = next,
+                Ok(other) => { lookahead = Some(other); break; }
+                Err(_) => break,
+            }
+        }
+        let response = match request {
             Ok(Request::Query { providers, query, limit, exact, stream: Some(true) }) => {
                 let registry = startup.wait_registry()?;
                 let providers = providers.unwrap_or_default();
@@ -113,7 +131,7 @@ fn handle_client(mut stream: UnixStream, startup: Arc<Startup>) -> Result<()> {
                 subscribe(&mut stream, registry, &providers)?;
                 return Ok(());
             }
-            Err(err) => serde_json::to_value(Response { ok: false, data: json!({}), error: Some(err.to_string()) })?,
+            Err(err) => serde_json::to_value(Response { ok: false, data: json!({}), error: Some(err) })?,
         };
         writeln!(stream, "{}", serde_json::to_string(&response)?)?;
     }

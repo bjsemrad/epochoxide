@@ -42,6 +42,14 @@ Before/after on the 450k-file corpus (release build):
 
 Not changed (flagged as a real remaining scaling ceiling, not a bug): `FilesProvider::query` is still a linear scan over every indexed entry. The bitmask prefilter helps a lot for selective/no-match queries but a query like `"lib"` that many entries genuinely contain still costs ~150ms at 450k+ entries. Fixing that further means a real search structure (trigram/prefix index) or capping the live in-memory set — a bigger change than this pass.
 
+## Launcher-readiness pass (this session)
+
+You're wiring this daemon up to a QuickShell-based launcher. Asked "what's missing to be fully-featured" — answered with 6 gaps, prioritized 1-3 for this pass, deferred 4-6 (config hot-reload, files provider's expensive empty-query behavior, silent `run_shell` failures) pending your go-ahead.
+
+1. **Stale-query coalescing (`server.rs`)**: `handle_client` used to read one line, fully process it (blocking on all that query's provider threads), then read the next — so a fast typist (or any client that doesn't wait for each response) could queue several `Query` requests behind a slow one, each fully executed even though only the last one's result matters. Restructured: a background reader thread feeds parsed requests through an `mpsc` channel; the handler drains any already-queued requests and collapses consecutive `Query` requests down to the newest, *never starting work on the dropped ones*. Non-`Query` requests (`Activate`, `Menu`, `Providers`, `Subscribe`) are never dropped and always run in order. Verified live: firing 5 queries back-to-back with no waiting produced exactly 1 response, matching the last query sent.
+2. **Icon resolution is now theme-aware and cached (`src/icons.rs`)**: `config.icon_theme` was loaded from config and never read anywhere. `icons::resolve` did a naive unbounded-ish depth-4 recursive directory walk with no cache, re-walking from scratch on every query for every item. Replaced with `IconResolver`: parses each theme's `index.theme` (`Inherits=`, `Directories=`) to build a spec-informed ordered search path (chosen theme → inherited themes → `hicolor` → bare data dirs → `/usr/share/pixmaps`), and caches resolved icon-name → path lookups in an in-memory `Mutex<HashMap>` shared via `Registry`. No more recursive walks at all — just ordered direct-path `exists()` checks.
+3. **Windows provider has real icons and a close action (`src/providers/windows.rs`, `src/providers/apps.rs`)**: every window used to get the same generic icon and the only action was `focus`. `apps.rs` now parses `StartupWMClass` from `.desktop` files; `AppsProvider::wm_class_icons()` builds a `wm_class → icon` map (falling back to the desktop file's id when `StartupWMClass` is absent) which `Registry::new` passes into `WindowsProvider::new`. Windows now show the real app icon when their `app_id`/class matches an installed app. Added `close` across all 4 backends (hypr/sway/niri/wmctrl), mirroring the existing `focus` dispatch pattern. Not live-tested — no compositor available in this environment; syntax follows the same pattern as the pre-existing `focus` commands.
+
 ## Architecture
 
 Binary: `epochoxide` v0.1.0. Unix-socket daemon with plain TCP-less JSON-over-socket protocol.
@@ -110,8 +118,9 @@ thumbnail_cache_enabled = true   # default true
 
 ## Icons / thumbnails (`src/icons.rs`)
 
-- `resolve(icon, config)`: absolute path → itself; else search `~/.local/share/icons` then `icon_cache_dir` then `/usr/share/icons`, `/usr/share/pixmaps`, trying `{icon}.png|svg|xpm`, depth-4 recursive.
-- `thumbnail(source, config)`: no-op unless `thumbnail_cache_enabled` and dir exists; checks cached `<stamp>.png` (FNV1a hash); else renders via shell-out — SVG→`rsvg-convert -w 48 -h 48`, others→`convert -thumbnail 48x48 -background none`; graceful `None` on tool/path failure (no hard dependency).
+- `IconResolver::new(config)` builds an ordered search path once at startup: `theme_search_dirs` reads `config.icon_theme` (default `hicolor`), walks `<base>/<theme>/index.theme`'s `Inherits=` chain across `~/.local/share/icons`, `icon_cache_dir`, `/usr/share/icons`, appends `hicolor` as the spec-mandated fallback if not already inherited, then the bare data dirs and `/usr/share/pixmaps` as a last resort.
+- `IconResolver::resolve(icon)`: absolute path → itself if it exists; else checks the in-memory cache, else does an ordered direct `exists()` check (`{icon}.png|svg|xpm`) across the precomputed search dirs and caches the result (`Some` or `None`) so repeat lookups of the same icon name across queries cost nothing.
+- `thumbnail(source, config)`: unchanged, still a free function — no-op unless `thumbnail_cache_enabled` and dir exists; checks cached `<stamp>.png` (FNV1a hash); else renders via shell-out — SVG→`rsvg-convert -w 48 -h 48`, others→`convert -thumbnail 48x48 -background none`; graceful `None` on tool/path failure (no hard dependency).
 - Registry `query()`/`query_batches()` populate `Item.icon_path` and `Item.thumbnail` **after** the score-affecting work (weight, history bonus) and the truncate to `limit` — so icon/thumbnail resolution only runs on items that actually make it into the response, not every per-provider candidate.
 
 ## History ranking (`src/history.rs`)
@@ -129,13 +138,15 @@ thumbnail_cache_enabled = true   # default true
 
 ## Verification so far (must repeat any time something changes)
 
-- `cargo build` and `cargo test` (12 passed, 1 `#[ignore]`d perf test) pass. `cargo clippy --all-targets` is clean (zero warnings in our code).
+- `cargo build` and `cargo test` (16 passed, 1 `#[ignore]`d perf test) pass. `cargo clippy --all-targets` is clean (zero warnings in our code).
 - `nix build .` succeeds **only if all source files are git-tracked** — flakes ignore untracked files. We hit exactly this: `src/history.rs`, `src/icons.rs`, `src/providers/runner.rs` were untracked → "file not found for module icons/runner" in the Nix build. Fixing = `git add` them. This is a recurring trap for any new `src/*.rs`.
 - Streaming verified: `query --stream` prints per-provider batches; server emits `batched` provider lists; `done` terminates. **Concurrency verified live**: with `files` pointed at ~450k real files (slow, ~150ms) alongside `calc`/`runner` (near-instant) and `files` registered *before* both in `Registry::new`, the streamed output still arrived `calc, runner, files` — genuine completion-order streaming, not registration order.
 - Prefix routing verified live: `>…`→runner, `?…`→calc (computed `^^ 2+3*4` → `2+3*4 = 14`), `@…`→windows, `!…`→files (custom), `~…`→runner (custom).
 - Weights verified live: `apps=false` in config fully removes apps results; `files=100` vs `files=-10000` flipped files first→last in the merged result order.
 - Subscriptions verified live: with fresh `/tmp` config (`persistent_index=false`, `file_roots=["/tmp/ev-root"]`), `subscribe` printed `{"type":"subscribed"}` ack, then `{"event":{"kind":"index_changed","provider":"files"}}` after creating a file. Re-verified after adding the save debounce: a burst of 5 file creates 400ms apart still produced 5 immediate subscribe events, while the on-disk cache was rewritten only once (not 5×).
 - Nix-generated TOML verified: `pkgs.formats.toml` round-trip of custom `query_prefixes`/`provider_enabled` produces the exact TOML the daemon consumes.
+- Query coalescing verified live: a raw socket client fired 5 `query` requests back-to-back with no waiting between them; exactly 1 response came back, matching the last query sent (`fuzzyinfo` confirmed it was scored against the final query string, not an earlier one).
+- Windows provider capability verified live: `list-providers` shows `windows` with `actions: {focus, close}` after the wm_class-icon wiring change; daemon starts cleanly with all 7 default providers enabled.
 
 ## Known issues / follow-ups
 
@@ -144,7 +155,9 @@ thumbnail_cache_enabled = true   # default true
 3. **Thumbnail cache** is only exercised if `convert` or `rsvg-convert` exists; fallback returns `None` silently. Not covered by unit tests.
 4. README's "Nix" section doesn't yet document `stream`/`subscribe`; the Socket Protocol section now documents the `action_capabilities` removal (see this session's protocol change above). config.example.toml documents all current keys.
 5. `result` symlink is tracked in git status (should be gitignored).
-6. **Breaking wire-format change this session**: `Item.action_capabilities` was removed. Any UI/client code already reading that field per-item needs to switch to joining `item.actions` against the `Providers` capability list.
+6. **Breaking wire-format change (previous session)**: `Item.action_capabilities` was removed. Any UI/client code already reading that field per-item needs to switch to joining `item.actions` against the `Providers` capability list.
+7. **Deferred launcher-readiness items** (identified this session, not yet built, pending go-ahead): config hot-reload (inotify already wired for the file index, would need extending to `config.toml`); `files` provider's empty-query behavior currently scores and sorts the *entire* index (up to 686k items) since `fuzzy::score` matches everything with score 1 on an empty query — most launchers don't search files until you type something; `run_shell` spawns detached so a bad command (not found, immediate crash) never surfaces to the UI.
+8. **Windows `close` action is untested**: no compositor available in this dev environment, so hypr/sway/niri/wmctrl close commands were written to mirror the existing (already-untested-here, but presumably working) `focus` dispatch pattern rather than being verified live. Worth a real smoke test on your actual setup.
 
 ## Useful test setup
 
