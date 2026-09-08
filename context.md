@@ -65,7 +65,7 @@ Most notable addition: `icon_theme`. It was dead config before this session's ic
 
 Verification: `nix flake check` passes; evaluated the real `homeManagerModules.default` output via `nix eval`, ran the resulting attrset through the actual `pkgs.formats.toml` generator (not a hand-copied approximation), and fed that generated file to the built `epochoxide` binary — loads cleanly, all 7 providers initialize, and `list-providers`' prefixes came back as exactly the intended 6 with zero cross-contamination from the table-scoping bug. Also re-verified the fixed `config.example.toml` the same way.
 
-**Known follow-up not done**: the `defaultSettings` block is still duplicated verbatim between the Home Manager and NixOS modules (pre-existing, not introduced by this audit). Lifting it into a shared top-level `let` binding would remove ~50 lines of duplication — not attempted since it wasn't asked for and is a structural change, not a content fix.
+**Follow-up done**: `defaultSettings` and the `runtimePackages` default list (also duplicated verbatim) are now both defined once in the outer `let` of `outputs` and shared by both `homeManagerModules.default` and `nixosModules.default` — neither depends on `config`/`lib`/module-local `pkgs` (the packages list needed `pkgs`, so it's `defaultRuntimePackages: pkgs -> [...]`, called as `defaultRuntimePackages pkgs` in each module). Net -61 lines. Verified byte-for-byte identical output: imported both the pre-refactor and post-refactor `flake.nix` side by side in the same `nix eval`, generated the actual `settings.default` TOML and `runtimePackages.default` list from both modules under both versions, and diffed — zero difference. `nix flake check` passes.
 
 ## Architecture
 

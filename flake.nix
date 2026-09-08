@@ -42,6 +42,79 @@
             platforms = pkgs.lib.platforms.linux;
           };
         };
+
+      # Shared between homeManagerModules.default and nixosModules.default so the two
+      # deployment paths can't quietly drift apart on defaults.
+      defaultSettings = {
+        file_roots = [ "~" ];
+        ignored_dirs = [
+          "~/.cache"
+          "~/.local/share/Trash"
+          "~/.cargo/registry"
+          "~/.rustup"
+          "~/.npm"
+          "~/.pnpm-store"
+          "~/.var/app"
+          ".git"
+          "node_modules"
+          "target"
+          "dist"
+          "build"
+          ".direnv"
+        ];
+        menus_dir = "~/.config/epochoxide/menus";
+        launch_prefix = "";
+        terminal_cmd = "";
+        clipboard_max_items = 100;
+        clipboard_image_dir = "~/.cache/epochoxide/clipboard/images";
+        # clipboard_text_editor is deliberately left unset so the daemon's own
+        # $EDITOR-sensing default keeps working for Nix-managed installs.
+        clipboard_image_editor = "";
+        clipboard_ocr = false;
+        clipboard_capture_interval_ms = 250;
+        runner_scan_path = true;
+        runner_commands = [ ];
+        provider_enabled = {
+          apps = true;
+          files = true;
+          runner = true;
+          clipboard = true;
+          windows = true;
+          calc = true;
+          menus = true;
+        };
+        provider_weights = {
+          apps = 20000;
+          runner = 12000;
+          calc = 10000;
+          windows = 6000;
+          menus = 2000;
+          files = 0;
+          clipboard = 0;
+        };
+        query_prefixes = {
+          ">" = "runner";
+          "/" = "files";
+          "#" = "clipboard";
+          "@" = "windows";
+          ":" = "menus";
+          "?" = "calc";
+        };
+        icon_theme = "";
+        icon_cache_dir = "~/.cache/epochoxide/icons";
+        thumbnail_cache_enabled = true;
+        persistent_index = true;
+      };
+
+      defaultRuntimePackages =
+        pkgs: with pkgs; [
+          wl-clipboard
+          xclip
+          xdg-utils
+          wmctrl
+          tesseract
+          libqalculate
+        ];
     in
     {
       packages = forAllSystems (pkgs: {
@@ -74,66 +147,6 @@
           package = cfg.package;
           socket = cfg.socket;
           runtimePath = lib.makeBinPath cfg.runtimePackages;
-          defaultSettings = {
-            file_roots = [ "~" ];
-            ignored_dirs = [
-              "~/.cache"
-              "~/.local/share/Trash"
-              "~/.cargo/registry"
-              "~/.rustup"
-              "~/.npm"
-              "~/.pnpm-store"
-              "~/.var/app"
-              ".git"
-              "node_modules"
-              "target"
-              "dist"
-              "build"
-              ".direnv"
-            ];
-            menus_dir = "~/.config/epochoxide/menus";
-            launch_prefix = "";
-            terminal_cmd = "";
-            clipboard_max_items = 100;
-            clipboard_image_dir = "~/.cache/epochoxide/clipboard/images";
-            # clipboard_text_editor is deliberately left unset so the daemon's own
-            # $EDITOR-sensing default keeps working for Nix-managed installs.
-            clipboard_image_editor = "";
-            clipboard_ocr = false;
-            clipboard_capture_interval_ms = 250;
-            runner_scan_path = true;
-            runner_commands = [ ];
-            provider_enabled = {
-              apps = true;
-              files = true;
-              runner = true;
-              clipboard = true;
-              windows = true;
-              calc = true;
-              menus = true;
-            };
-            provider_weights = {
-              apps = 20000;
-              runner = 12000;
-              calc = 10000;
-              windows = 6000;
-              menus = 2000;
-              files = 0;
-              clipboard = 0;
-            };
-            query_prefixes = {
-              ">" = "runner";
-              "/" = "files";
-              "#" = "clipboard";
-              "@" = "windows";
-              ":" = "menus";
-              "?" = "calc";
-            };
-            icon_theme = "";
-            icon_cache_dir = "~/.cache/epochoxide/icons";
-            thumbnail_cache_enabled = true;
-            persistent_index = true;
-          };
         in
         {
           options.programs.epochoxide = {
@@ -150,14 +163,7 @@
             };
             runtimePackages = lib.mkOption {
               type = lib.types.listOf lib.types.package;
-              default = [
-                pkgs.wl-clipboard
-                pkgs.xclip
-                pkgs.xdg-utils
-                pkgs.wmctrl
-                pkgs.tesseract
-                pkgs.libqalculate
-              ];
+              default = defaultRuntimePackages pkgs;
               description = "Runtime tools made available to providers in the user service.";
             };
             socket = lib.mkOption {
@@ -209,66 +215,6 @@
           package = cfg.package;
           runtimePath = lib.makeBinPath cfg.runtimePackages;
           tomlFormat = pkgs.formats.toml { };
-          defaultSettings = {
-            file_roots = [ "~" ];
-            ignored_dirs = [
-              "~/.cache"
-              "~/.local/share/Trash"
-              "~/.cargo/registry"
-              "~/.rustup"
-              "~/.npm"
-              "~/.pnpm-store"
-              "~/.var/app"
-              ".git"
-              "node_modules"
-              "target"
-              "dist"
-              "build"
-              ".direnv"
-            ];
-            menus_dir = "~/.config/epochoxide/menus";
-            launch_prefix = "";
-            terminal_cmd = "";
-            clipboard_max_items = 100;
-            clipboard_image_dir = "~/.cache/epochoxide/clipboard/images";
-            # clipboard_text_editor is deliberately left unset so the daemon's own
-            # $EDITOR-sensing default keeps working for Nix-managed installs.
-            clipboard_image_editor = "";
-            clipboard_ocr = false;
-            clipboard_capture_interval_ms = 250;
-            runner_scan_path = true;
-            runner_commands = [ ];
-            provider_enabled = {
-              apps = true;
-              files = true;
-              runner = true;
-              clipboard = true;
-              windows = true;
-              calc = true;
-              menus = true;
-            };
-            provider_weights = {
-              apps = 20000;
-              runner = 12000;
-              calc = 10000;
-              windows = 6000;
-              menus = 2000;
-              files = 0;
-              clipboard = 0;
-            };
-            query_prefixes = {
-              ">" = "runner";
-              "/" = "files";
-              "#" = "clipboard";
-              "@" = "windows";
-              ":" = "menus";
-              "?" = "calc";
-            };
-            icon_theme = "";
-            icon_cache_dir = "~/.cache/epochoxide/icons";
-            thumbnail_cache_enabled = true;
-            persistent_index = true;
-          };
           configFile = tomlFormat.generate "epochoxide-config.toml" (defaultSettings // cfg.settings);
         in
         {
@@ -286,14 +232,7 @@
             };
             runtimePackages = lib.mkOption {
               type = lib.types.listOf lib.types.package;
-              default = [
-                pkgs.wl-clipboard
-                pkgs.xclip
-                pkgs.xdg-utils
-                pkgs.wmctrl
-                pkgs.tesseract
-                pkgs.libqalculate
-              ];
+              default = defaultRuntimePackages pkgs;
               description = "Runtime tools made available to providers in the user service.";
             };
             settings = lib.mkOption {
