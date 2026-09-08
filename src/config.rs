@@ -91,8 +91,12 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn resolved_path(path: Option<&str>) -> Option<PathBuf> {
+        path.map(PathBuf::from).or_else(default_config_path)
+    }
+
     pub fn load(path: Option<&str>) -> Result<Self> {
-        let Some(path) = path.map(PathBuf::from).or_else(default_config_path) else {
+        let Some(path) = Self::resolved_path(path) else {
             return Ok(Self::default());
         };
         if !path.exists() {

@@ -1,8 +1,9 @@
 use crate::providers::Registry;
 use anyhow::{Context, Result};
+use notify::Watcher;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{fs, io::{BufRead, BufReader, Write}, os::unix::net::{UnixListener, UnixStream}, path::Path, sync::{mpsc, Arc, Condvar, Mutex}, thread, time::Duration};
+use std::{fs, io::{BufRead, BufReader, Write}, os::unix::net::{UnixListener, UnixStream}, path::{Path, PathBuf}, sync::{mpsc, Arc, Condvar, Mutex}, thread, time::Duration};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -21,7 +22,7 @@ struct Response<T: Serialize> {
     error: Option<String>,
 }
 
-pub fn serve(socket: &str, build: impl FnOnce() -> Result<Registry> + Send + 'static) -> Result<()> {
+pub fn serve(socket: &str, config_path: Option<PathBuf>, build: impl FnOnce() -> Result<Registry> + Send + 'static) -> Result<()> {
     let path = Path::new(socket);
     if path.exists() { fs::remove_file(path).with_context(|| format!("removing stale socket {socket}"))?; }
     if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
@@ -35,6 +36,11 @@ pub fn serve(socket: &str, build: impl FnOnce() -> Result<Registry> + Send + 'st
         *slot = Some(result.map(Arc::new).map_err(|e| e.to_string()));
         spawn_startup.ready.notify_all();
     });
+
+    if let Some(config_path) = config_path {
+        let watch_startup = Arc::clone(&startup);
+        thread::spawn(move || watch_config(config_path, watch_startup));
+    }
 
     for stream in listener.incoming() {
         match stream {
@@ -66,6 +72,22 @@ impl Startup {
                 };
             }
             slot = self.ready.wait(slot).unwrap();
+        }
+    }
+}
+
+fn watch_config(path: PathBuf, startup: Arc<Startup>) {
+    let Ok(registry) = startup.wait_registry() else { return };
+    let Some(parent) = path.parent() else { return };
+    let (tx, rx) = mpsc::channel();
+    let Ok(mut watcher) = notify::recommended_watcher(tx) else { return };
+    if watcher.watch(parent, notify::RecursiveMode::NonRecursive).is_err() { return; }
+    for event in rx {
+        let Ok(event) = event else { continue };
+        if !event.paths.iter().any(|p| p == &path) { continue; }
+        match crate::config::Config::load(path.to_str()) {
+            Ok(config) => registry.reload_config(config),
+            Err(err) => eprintln!("config reload failed: {err}"),
         }
     }
 }

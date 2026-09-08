@@ -224,6 +224,7 @@ fn copy_clip(clip: &Clip) -> Result<()> {
 fn copy_text(text: &str) -> Result<()> {
     let mut child = Command::new("wl-copy").stdin(Stdio::piped()).spawn()?;
     child.stdin.as_mut().context("clipboard stdin unavailable")?.write_all(text.as_bytes())?;
+    super::reap(child);
     Ok(())
 }
 

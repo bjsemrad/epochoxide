@@ -143,6 +143,7 @@ impl Provider for FilesProvider {
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         self.drain_events();
+        if query.is_empty() { return Vec::new(); }
         let query_mask = fuzzy::mask(&query.to_lowercase());
         let mut out = Vec::new();
         for f in self.files.values() {
@@ -217,12 +218,13 @@ fn copy_text(text: &str) -> Result<()> {
     let mut child = Command::new("wl-copy").stdin(Stdio::piped()).spawn().or_else(|_| Command::new("xclip").args(["-selection", "clipboard"]).stdin(Stdio::piped()).spawn())?;
     use std::io::Write;
     child.stdin.as_mut().context("clipboard stdin unavailable")?.write_all(text.as_bytes())?;
+    super::reap(child);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::FilesProvider;
+    use super::{FilesProvider, Provider};
     use crate::config::{expand, Config};
     use std::path::{Path, PathBuf};
 
@@ -230,6 +232,13 @@ mod tests {
         let config = Config::default();
         let ignored_dirs = config.ignored_dirs.iter().map(|i| expand(i)).collect();
         FilesProvider { config, files: Default::default(), watcher: None, events: None, changed: false, cache_path: PathBuf::new(), ignored_dirs, dirty: false, last_saved: None }
+    }
+
+    #[test]
+    fn empty_query_skips_the_scan_entirely() {
+        let mut provider = test_provider();
+        provider.files.insert("/tmp/foo".into(), super::IndexedFile { path: PathBuf::from("/tmp/foo"), display: "/tmp/foo".into(), search: "/tmp/foo".into(), mask: 0 });
+        assert!(provider.query("", 20, false).is_empty());
     }
 
     #[test]

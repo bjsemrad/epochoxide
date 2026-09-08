@@ -77,7 +77,8 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Serve { socket } => {
             let socket = socket.unwrap_or_else(|| config.socket.clone());
-            server::serve(&socket, move || Registry::new(config.clone()))
+            let config_path = Config::resolved_path(cli.config.as_deref());
+            server::serve(&socket, config_path, move || Registry::new(config.clone()))
         }
         Command::Query { providers, query, limit, exact, stream } => {
             if stream {
