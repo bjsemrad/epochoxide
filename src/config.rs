@@ -2,6 +2,23 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::{Path, PathBuf}};
 
+/// How the files provider gets its search results.
+///
+/// The in-memory index answers in microseconds where fd takes ~200ms over a large home directory,
+/// but it holds every indexed path in RAM — roughly 1.6KB per entry, so a 700k-entry home costs
+/// over a gigabyte against fd's near-zero. Which of those matters is the user's call, not ours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileIndex {
+    /// Search with fd, and build the index only as a fallback when fd is not installed.
+    #[default]
+    Auto,
+    /// Always build the index, and use it in preference to fd. Fast, memory-hungry.
+    Always,
+    /// Never build the index. The files provider goes quiet if fd is not installed.
+    Never,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub socket: String,
@@ -25,6 +42,7 @@ pub struct Config {
     pub icon_cache_dir: String,
     pub thumbnail_cache_enabled: bool,
     pub persistent_index: bool,
+    pub file_index: FileIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -59,6 +77,7 @@ struct PartialConfig {
     icon_cache_dir: Option<String>,
     thumbnail_cache_enabled: Option<bool>,
     persistent_index: Option<bool>,
+    file_index: Option<FileIndex>,
 }
 
 impl Default for Config {
@@ -86,6 +105,7 @@ impl Default for Config {
             icon_cache_dir: dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("epochoxide/icons").display().to_string(),
             thumbnail_cache_enabled: true,
             persistent_index: true,
+            file_index: FileIndex::default(),
         }
     }
 }
@@ -126,6 +146,7 @@ impl Config {
         if let Some(v) = partial.icon_cache_dir { cfg.icon_cache_dir = v; }
         if let Some(v) = partial.thumbnail_cache_enabled { cfg.thumbnail_cache_enabled = v; }
         if let Some(v) = partial.persistent_index { cfg.persistent_index = v; }
+        if let Some(v) = partial.file_index { cfg.file_index = v; }
         cfg.expand_paths();
         Ok(cfg)
     }

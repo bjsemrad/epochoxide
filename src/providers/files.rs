@@ -1,5 +1,5 @@
 use super::{run_shell, Provider};
-use crate::{config::{expand, Config}, fuzzy, types::{action_map, ActionCapability, Item, ItemType, ProviderCapability}};
+use crate::{config::{expand, Config, FileIndex}, fuzzy, types::{action_map, ActionCapability, Item, ItemType, ProviderCapability}};
 use anyhow::{Context, Result};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub struct LazyFilesProvider {
 impl LazyFilesProvider {
     pub fn new(config: Config) -> Self {
         let inner = Arc::new(Mutex::new(None));
-        if fd_program().is_none() {
+        if wants_index(&config) {
             let load_inner = Arc::clone(&inner);
             let load_config = config.clone();
             thread::spawn(move || {
@@ -28,22 +28,39 @@ impl LazyFilesProvider {
     }
 }
 
+/// The index is only built when the user asked for it, or when fd is missing and it is the only
+/// way to answer at all. See [`FileIndex`] for the trade it makes.
+fn wants_index(config: &Config) -> bool {
+    match config.file_index {
+        FileIndex::Always => true,
+        FileIndex::Auto => fd_program().is_none(),
+        FileIndex::Never => false,
+    }
+}
+
 impl Provider for LazyFilesProvider {
     fn name(&self) -> &'static str { "files" }
     fn pretty_name(&self) -> &'static str { "Files" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
-        let fallback = fd_query(&self.config, query, limit, exact);
-        if !fallback.is_empty() { return fallback; }
-        let Ok(mut inner) = self.inner.try_lock() else { return fd_query(&self.config, query, limit, exact); };
-        let Some(provider) = inner.as_mut() else { return fd_query(&self.config, query, limit, exact); };
-        provider.query(query, limit, exact)
+        // try_lock, not lock: a keystroke that lands while the watcher is draining should fall
+        // back to fd rather than stall behind it.
+        if let Ok(mut inner) = self.inner.try_lock() {
+            if let Some(provider) = inner.as_mut() { return provider.query(query, limit, exact); }
+        }
+        // Reached while the index is still loading, or when it was never asked for. fd_query is
+        // already empty-safe when fd is missing, which is the documented cost of `never`.
+        fd_query(&self.config, query, limit, exact)
     }
 
     fn activate(&mut self, identifier: &str, action: &str, query: &str, arguments: &str) -> Result<()> {
-        let Ok(mut inner) = self.inner.try_lock() else { return Ok(()); };
-        let Some(provider) = inner.as_mut() else { return activate_path(identifier, action); };
-        provider.activate(identifier, action, query, arguments)
+        // Blocking is right here where it is wrong in query: activation is a one-shot the user is
+        // waiting on, and skipping it because the index happened to be busy silently does nothing.
+        let mut inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        match inner.as_mut() {
+            Some(provider) => provider.activate(identifier, action, query, arguments),
+            None => activate_path(identifier, action),
+        }
     }
 
     fn events(&mut self) -> Vec<serde_json::Value> {
@@ -238,6 +255,17 @@ impl FilesProvider {
     }
 }
 
+/// Matching against the whole path means every file under a matching directory scores identically
+/// off that one directory name, so a query like "proj" buries the files actually called that under
+/// everything in ~/projects. Lift matches that land in the entry's own name above those.
+fn name_match_bonus(search: &str, start: usize) -> i32 {
+    // fd prints directories with a trailing slash, which would otherwise make every directory's
+    // own name look like an ancestor component and cost it the bonus.
+    let path = search.strip_suffix('/').unwrap_or(search);
+    let name_start = path.rfind('/').map(|slash| slash + 1).unwrap_or(0);
+    if start >= name_start { 2_000 } else { 0 }
+}
+
 fn is_ignored_path(path: &Path, ignored: &[String]) -> bool {
     ignored.iter().any(|i| {
         if i.starts_with('/') { path.starts_with(i) } else { path.components().any(|c| c.as_os_str() == i.as_str()) }
@@ -263,6 +291,7 @@ impl Provider for FilesProvider {
         for f in files {
             if f.mask & query_mask != query_mask { continue; }
             if let Some((score, info)) = fuzzy::score_lower(&query_lower, &f.search, exact, "text") {
+                let score = score + name_match_bonus(&f.search, info.start);
                 let mut item = Item::new(self.name(), &f.display, &f.display);
                 item.item_type = ItemType::File;
                 item.preview = f.display.clone();
@@ -320,12 +349,17 @@ fn files_capability() -> ProviderCapability {
 }
 
 fn fd_query(config: &Config, query: &str, limit: usize, exact: bool) -> Vec<Item> {
-    if query.is_empty() { return Vec::new(); }
+    if query.trim().is_empty() { return Vec::new(); }
     let Some(program) = fd_program() else { return Vec::new(); };
+    let ignored = config.ignored_dirs.iter().map(|i| expand(i)).collect::<Vec<_>>();
     let mut command = Command::new(program);
-    command.arg(query);
+    command.arg(fd_pattern(query));
     for root in &config.file_roots { command.arg(expand(root)); }
-    command.args(["--ignore-vcs", "--type", "file", "--type", "directory", "--max-results", &limit.saturating_mul(3).max(limit).to_string()]);
+    command.args(["--ignore-vcs", "--full-path", "--ignore-case", "--type", "file", "--type", "directory"]);
+    // Bare names are gitignore-style globs fd can prune the walk with; the rooted entries are
+    // left to is_ignored_path below, since fd anchors a slash-bearing glob to the search root.
+    for dir in ignored.iter().filter(|dir| !dir.contains('/')) { command.args(["--exclude", dir]); }
+    command.args(["--max-results", &QUERY_CANDIDATE_LIMIT.max(limit).to_string()]);
 
     let Ok(out) = command.output() else { return Vec::new(); };
     if !out.status.success() { return Vec::new(); }
@@ -333,9 +367,11 @@ fn fd_query(config: &Config, query: &str, limit: usize, exact: bool) -> Vec<Item
     let query_lower = query.to_lowercase();
     let mut items = String::from_utf8_lossy(&out.stdout)
         .lines()
+        .filter(|path| !is_ignored_path(Path::new(path), &ignored))
         .filter_map(|path| {
             let search = path.to_lowercase();
             let (score, info) = fuzzy::score_lower(&query_lower, &search, exact, "text")?;
+            let score = score + name_match_bonus(&search, info.start);
             let mut item = Item::new("files", path, path);
             item.item_type = ItemType::File;
             item.preview = path.to_string();
@@ -350,6 +386,18 @@ fn fd_query(config: &Config, query: &str, limit: usize, exact: bool) -> Vec<Item
     items.sort_by_key(|item| std::cmp::Reverse(item.score));
     items.truncate(limit);
     items
+}
+
+/// fd matches its pattern against the basename only, so an unqualified query like "epoch" finds
+/// the directories named that way but none of the files inside them. `--full-path` matches the
+/// whole path instead, which is what the in-process index has always scored against; the pattern
+/// is a regex there, so the query has to be escaped to stay the literal text the user typed.
+fn fd_pattern(query: &str) -> String {
+    query.chars().fold(String::with_capacity(query.len() * 2), |mut pattern, c| {
+        if !c.is_alphanumeric() && !matches!(c, '_' | '-' | '/') { pattern.push('\\'); }
+        pattern.push(c);
+        pattern
+    })
 }
 
 fn fd_program() -> Option<&'static str> {
@@ -441,6 +489,41 @@ mod tests {
         provider.add_path(Path::new("/tmp/lib-alpha.txt"));
 
         assert_eq!(provider.candidate_keys("xyz"), Some(Vec::new()));
+    }
+
+    #[test]
+    fn fd_pattern_matches_paths_not_just_basenames() {
+        // "epoch" has to reach /home/me/EpochOxide/src/main.rs, not only the directory itself.
+        assert_eq!(super::fd_pattern("epoch"), "epoch");
+        assert_eq!(super::fd_pattern("src/main"), "src/main");
+    }
+
+    #[test]
+    fn fd_pattern_escapes_regex_metacharacters() {
+        assert_eq!(super::fd_pattern("config.toml"), r"config\.toml");
+        assert_eq!(super::fd_pattern("main(1)+"), r"main\(1\)\+");
+    }
+
+    #[test]
+    fn name_matches_outrank_ancestor_directory_matches() {
+        let dir_only = super::name_match_bonus("/home/me/projects/epochoxide/src/main.rs", 9);
+        let own_name = super::name_match_bonus("/home/me/src/projects.rs", 13);
+        assert_eq!(dir_only, 0);
+        assert!(own_name > dir_only);
+        // fd prints directories with a trailing slash; the bonus has to survive it.
+        assert_eq!(super::name_match_bonus("/home/me/notes/", 9), own_name);
+    }
+
+    #[test]
+    fn index_is_built_only_when_asked_for_or_needed() {
+        use crate::config::FileIndex;
+        let always = Config { file_index: FileIndex::Always, ..Config::default() };
+        let never = Config { file_index: FileIndex::Never, ..Config::default() };
+        let auto = Config { file_index: FileIndex::Auto, ..Config::default() };
+        assert!(super::wants_index(&always));
+        assert!(!super::wants_index(&never));
+        // Auto tracks fd: it indexes exactly when fd cannot answer for it.
+        assert_eq!(super::wants_index(&auto), super::fd_program().is_none());
     }
 
     #[test]

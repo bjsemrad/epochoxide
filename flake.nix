@@ -104,6 +104,11 @@
         icon_cache_dir = "~/.cache/epochoxide/icons";
         thumbnail_cache_enabled = true;
         persistent_index = true;
+        # "auto" searches with fd and only builds the in-memory index when fd is missing.
+        # "always" trades memory for latency: <10ms queries instead of ~200ms, at the cost of
+        # holding every indexed path in RAM (>1GB over a 700k-entry home directory).
+        # "never" keeps the daemon small and relies on fd being installed.
+        file_index = "auto";
       };
 
       defaultRuntimePackages =

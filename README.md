@@ -172,7 +172,19 @@ epochoxide query --providers apps --query browser --limit 10
 
 ### Files
 
-The `files` provider indexes configured directories and returns file items with preview metadata. In daemon mode it watches configured roots and applies filesystem changes incrementally before queries. On Linux this uses inotify through the `notify` backend.
+The `files` provider searches the configured roots and returns file items with preview metadata. Matching is against the whole path, not just the file name, so `epoch` finds everything under `EpochOxide/` and not merely the directory itself; entries whose own name matches are ranked above those that only match an ancestor directory.
+
+Two search backends sit behind it, selected by `file_index`:
+
+| `file_index` | Backend | Query latency | Daemon memory |
+| --- | --- | --- | --- |
+| `"auto"` (default) | `fd`, falling back to the index if `fd` is missing | ~200ms | ~5-10MB |
+| `"always"` | in-memory index | <10ms | ~1.6KB per indexed path (>1GB over a 700k-entry home) |
+| `"never"` | `fd` only; provider goes quiet without it | ~200ms | ~5-10MB |
+
+`fd` re-walks the roots on every query, which is why it is slower but flat in memory. The index holds every path under every root and answers from RAM, which is why it is fast but expensive — on a home directory full of `node_modules`, Go module caches and vendored trees, narrowing `file_roots`/`ignored_dirs` matters more than the backend choice.
+
+In daemon mode the index (when built) watches configured roots and applies filesystem changes incrementally before queries. On Linux this uses inotify through the `notify` backend.
 
 Actions:
 

@@ -16,6 +16,13 @@ icon_cache_dir = "~/.cache/epochoxide/icons"
 thumbnail_cache_enabled = true
 persistent_index = true
 
+# How the files provider searches.
+#   "auto"   - search with fd, building the in-memory index only if fd is not installed (default)
+#   "always" - always build the index: ~200ms -> <10ms per query, but it holds every indexed path
+#              in RAM (~1.6KB per entry, so >1GB over a 700k-entry home directory)
+#   "never"  - never build the index; the files provider goes quiet if fd is not installed
+file_index = "auto"
+
 [provider_enabled]
 apps = true
 files = true
