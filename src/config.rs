@@ -197,11 +197,13 @@ fn default_provider_enabled() -> HashMap<String, bool> {
 }
 
 fn default_provider_weights() -> HashMap<String, i32> {
-    [("apps", 20_000), ("runner", 12_000), ("calc", 10_000), ("windows", 6_000), ("files", 0), ("clipboard", 0), ("menus", 2_000)]
+    [("apps", 20_000), ("runner", 12_000), ("calc", 10_000), ("windows", 6_000), ("files", 0), ("clipboard", 0)]
         .into_iter().map(|(p, w)| (p.to_string(), w)).collect()
 }
 
+/// Menus get no default prefix: each one registers under its own name, so a shortcut for it is a
+/// `"?" = "keybinds"` line the user adds here alongside the built-in providers.
 fn default_query_prefixes() -> HashMap<String, String> {
-    [(">", "runner"), ("/", "files"), ("#", "clipboard"), ("@", "windows"), (":", "menus"), ("?", "calc")]
+    [(">", "runner"), ("/", "files"), ("#", "clipboard"), ("@", "windows"), ("=", "calc")]
         .into_iter().map(|(prefix, provider)| (prefix.to_string(), provider.to_string())).collect()
 }

@@ -88,17 +88,17 @@
           runner = 12000;
           calc = 10000;
           windows = 6000;
-          menus = 2000;
           files = 0;
           clipboard = 0;
         };
+        # Menus take a prefix under their own name (each menu is its own provider), so "?" is
+        # left free for one rather than spent on the calculator.
         query_prefixes = {
           ">" = "runner";
           "/" = "files";
           "#" = "clipboard";
           "@" = "windows";
-          ":" = "menus";
-          "?" = "calc";
+          "=" = "calc";
         };
         icon_theme = "";
         icon_cache_dir = "~/.cache/epochoxide/icons";
@@ -197,7 +197,7 @@
             home.packages = [ package ];
 
             xdg.configFile."epochoxide/config.toml" = {
-              source = tomlFormat.generate "epochoxide-config.toml" (defaultSettings // cfg.settings);
+              source = tomlFormat.generate "epochoxide-config.toml" (lib.recursiveUpdate defaultSettings cfg.settings);
             };
 
             systemd.user.services.epochoxide = lib.mkIf cfg.enableService {
@@ -232,7 +232,7 @@
           profilePath = "/run/current-system/sw/bin";
           servicePath = lib.concatStringsSep ":" (lib.filter (p: p != "") [ runtimePath profilePath ]);
           tomlFormat = pkgs.formats.toml { };
-          configFile = tomlFormat.generate "epochoxide-config.toml" (defaultSettings // cfg.settings);
+          configFile = tomlFormat.generate "epochoxide-config.toml" (lib.recursiveUpdate defaultSettings cfg.settings);
         in
         {
           options.services.epochoxide = {

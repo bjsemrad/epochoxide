@@ -58,6 +58,7 @@ pub struct ProviderCapability {
     pub name: String,
     pub name_pretty: String,
     pub description: String,
+    pub icon: String,
     pub prefixes: Vec<String>,
     pub actions: HashMap<String, ActionCapability>,
     pub supports_query: bool,

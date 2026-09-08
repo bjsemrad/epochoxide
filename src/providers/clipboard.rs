@@ -123,8 +123,8 @@ impl ClipboardProvider {
 }
 
 impl Provider for ClipboardProvider {
-    fn name(&self) -> &'static str { "clipboard" }
-    fn pretty_name(&self) -> &'static str { "Clipboard" }
+    fn name(&self) -> &str { "clipboard" }
+    fn pretty_name(&self) -> &str { "Clipboard" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         self.store.capture_current();
@@ -209,6 +209,7 @@ impl Provider for ClipboardProvider {
             name: self.name().into(),
             name_pretty: self.pretty_name().into(),
             description: "Search text/image clipboard history with optional OCR".into(),
+            icon: String::new(),
             prefixes: Vec::new(),
             actions: action_map(&[
                 ("copy", ActionCapability::new("Copy")),

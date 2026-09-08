@@ -72,7 +72,7 @@ systemctl --user status epochoxide.service
 Query through the warm daemon:
 
 ```bash
-epochoxide query --providers apps,files,runner,clipboard,windows,calc,menus --query fire --limit 20
+epochoxide query --providers apps,files,runner,clipboard,windows,calc --query fire --limit 20
 ```
 
 ## Socket Location
@@ -258,12 +258,25 @@ epochoxide query --providers calc --query "sqrt(144)" --limit 5
 
 ### Menus
 
-The `menus` provider loads TOML menu definitions from the configured menu directory.
+Every TOML menu in the configured menu directory registers as a provider of its own, named after
+the menu. There is no umbrella `menus` provider to drill through: a menu is queried, prefixed, and
+listed like any other provider.
 
 ```bash
-epochoxide query --providers menus --query bookmarks --limit 10
+epochoxide query --providers bookmarks --query rust --limit 10
 epochoxide menu bookmarks
 ```
+
+Give a menu a shortcut by pointing a prefix at its name, the same way the built-in providers get
+theirs:
+
+```toml
+[query_prefixes]
+"?" = "keybinds"
+```
+
+`provider_enabled` and `provider_weights` accept a menu name too, so a single menu can be switched
+off or reweighted without touching the others. Setting `menus = false` still disables all of them.
 
 ## Configuration
 
@@ -302,13 +315,17 @@ See `config.example.toml` for a starter file.
 
 ## Custom Menus
 
-Menu files are TOML files placed in `menus_dir`.
+Menu files are TOML files placed in `menus_dir`. Each becomes its own provider: `name` is the
+provider name a prefix points at, `name_pretty`, `description` and `icon` are how it presents
+itself in a launcher's provider list, and `icon` is also the fallback icon for entries that do not
+carry one.
 
 Example:
 
 ```toml
 name = "bookmarks"
 name_pretty = "Bookmarks"
+description = "Sites worth keeping"
 icon = "bookmark"
 action = "xdg-open %VALUE%"
 
@@ -321,6 +338,40 @@ keywords = ["language", "systems"]
 text = "EpochOxide"
 value = "https://github.com/"
 keywords = ["desktop", "provider"]
+```
+
+An entry either runs something or hands back text. `value` is substituted into the menu's `action`
+(or an entry's own `[actions]`) and run as a shell command; `copy` instead puts its text on the
+clipboard and runs nothing, so command menus and snippet menus can share a file.
+
+```toml
+name = "screenshots"
+name_pretty = "Screenshots"
+icon = "applications-graphics"
+action = "%VALUE%"
+
+[[entries]]
+text = "Region to clipboard"
+value = "grim -g \"$(slurp)\" - | wl-copy"
+
+[[entries]]
+text = "Record screen"
+value = "wf-recorder -f ~/Videos/$(date +%s).mp4"
+
+[[entries]]
+text = "Shrug"
+copy = "¯\\_(ツ)_/¯"
+```
+
+`command` replaces `entries` with a generator: any program emitting the same entries as a JSON
+array. Its output is cached briefly so a generator that shells out is not re-run per keystroke.
+
+```toml
+name = "keybinds"
+name_pretty = "Keybinds"
+icon = "input-keyboard"
+action = "%VALUE%"
+command = "~/.config/epochoxide/menus/keybinds.sh"
 ```
 
 Run:

@@ -7,8 +7,8 @@ pub struct CalcProvider { history: Vec<(String, String)> }
 impl CalcProvider { pub fn new(_config: Config) -> Self { Self { history: Vec::new() } } }
 
 impl Provider for CalcProvider {
-    fn name(&self) -> &'static str { "calc" }
-    fn pretty_name(&self) -> &'static str { "Calculator" }
+    fn name(&self) -> &str { "calc" }
+    fn pretty_name(&self) -> &str { "Calculator" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         let mut out = Vec::new();
@@ -51,6 +51,7 @@ impl Provider for CalcProvider {
             name: self.name().into(),
             name_pretty: self.pretty_name().into(),
             description: "Evaluate calculations and copy/save results".into(),
+            icon: String::new(),
             prefixes: Vec::new(),
             actions: action_map(&[
                 ("copy", ActionCapability::new("Copy")),

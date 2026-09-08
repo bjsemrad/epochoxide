@@ -12,8 +12,8 @@ use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 
 pub trait Provider: Send {
-    fn name(&self) -> &'static str;
-    fn pretty_name(&self) -> &'static str;
+    fn name(&self) -> &str;
+    fn pretty_name(&self) -> &str;
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item>;
     fn activate(&mut self, identifier: &str, action: &str, query: &str, arguments: &str) -> Result<()>;
     fn menu(&mut self, _menu: &str) -> Vec<Item> { Vec::new() }
@@ -23,6 +23,7 @@ pub trait Provider: Send {
             name: self.name().to_string(),
             name_pretty: self.pretty_name().to_string(),
             description: self.pretty_name().to_string(),
+            icon: String::new(),
             prefixes: Vec::new(),
             actions: action_map(&[("open", ActionCapability::new("Open"))]),
             supports_query: true,
@@ -56,7 +57,16 @@ impl Registry {
         if enabled(&config, "clipboard") { providers.push(Box::new(clipboard::ClipboardProvider::new(config.clone())?)); }
         if enabled(&config, "windows") { providers.push(Box::new(windows::WindowsProvider::new(wm_class_icons))); }
         if enabled(&config, "calc") { providers.push(Box::new(calc::CalcProvider::new(config.clone()))); }
-        if enabled(&config, "menus") { providers.push(Box::new(menus::MenusProvider::new(config.clone())?)); }
+        // Menus are not one provider: each configured menu registers as its own, so it can be
+        // given a query prefix and jumped straight into. A menu whose name collides with a
+        // provider already registered is skipped rather than shadowing it.
+        if enabled(&config, "menus") {
+            for menu in menus::providers(&config)? {
+                if !enabled(&config, menu.name()) { continue; }
+                if providers.iter().any(|p| p.name() == menu.name()) { continue; }
+                providers.push(menu);
+            }
+        }
         let capabilities = providers.iter().map(|p| p.capability()).collect();
         let icons = icons::IconResolver::new(&config);
         let providers = providers.into_iter().map(|p| Arc::new(Mutex::new(p))).collect();
@@ -145,7 +155,7 @@ impl Registry {
     }
 
     pub fn menu(&self, name: &str) -> Vec<Item> {
-        let Some(idx) = self.capabilities.iter().position(|c| c.name == "menus") else { return Vec::new(); };
+        let Some(idx) = self.capabilities.iter().position(|c| c.name == name) else { return Vec::new(); };
         self.providers[idx].lock().unwrap().menu(name)
     }
 
@@ -211,6 +221,14 @@ impl Registry {
 
 fn enabled(config: &Config, provider: &str) -> bool {
     config.provider_enabled.get(provider).copied().unwrap_or(true)
+}
+
+pub fn copy_text(text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn()?;
+    child.stdin.as_mut().ok_or_else(|| anyhow!("clipboard stdin unavailable"))?.write_all(text.as_bytes())?;
+    reap(child);
+    Ok(())
 }
 
 pub fn run_shell(command: &str) -> Result<()> {

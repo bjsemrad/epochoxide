@@ -73,8 +73,8 @@ impl AppsProvider {
 }
 
 impl Provider for AppsProvider {
-    fn name(&self) -> &'static str { "apps" }
-    fn pretty_name(&self) -> &'static str { "Desktop Applications" }
+    fn name(&self) -> &str { "apps" }
+    fn pretty_name(&self) -> &str { "Desktop Applications" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         let query_lower = query.to_lowercase();
@@ -120,6 +120,7 @@ impl Provider for AppsProvider {
             name: self.name().into(),
             name_pretty: self.pretty_name().into(),
             description: "Search and launch desktop applications".into(),
+            icon: String::new(),
             prefixes: Vec::new(),
             actions: action_map(&[("open", ActionCapability::new("Open"))]),
             supports_query: true,

@@ -65,8 +65,8 @@ impl RunnerProvider {
 }
 
 impl Provider for RunnerProvider {
-    fn name(&self) -> &'static str { "runner" }
-    fn pretty_name(&self) -> &'static str { "Runner" }
+    fn name(&self) -> &str { "runner" }
+    fn pretty_name(&self) -> &str { "Runner" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         let query_lower = query.to_lowercase();
@@ -109,6 +109,7 @@ impl Provider for RunnerProvider {
             name: self.name().into(),
             name_pretty: self.pretty_name().into(),
             description: "Run executables from PATH and configured commands".into(),
+            icon: String::new(),
             prefixes: Vec::new(),
             actions: action_map(&[
                 ("run", ActionCapability::new("Run").needs_args()),

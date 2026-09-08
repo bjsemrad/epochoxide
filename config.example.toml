@@ -37,7 +37,6 @@ apps = 20000
 runner = 12000
 calc = 10000
 windows = 6000
-menus = 2000
 files = 0
 clipboard = 0
 
@@ -46,8 +45,11 @@ clipboard = 0
 "/" = "files"
 "#" = "clipboard"
 "@" = "windows"
-":" = "menus"
-"?" = "calc"
+"=" = "calc"
+
+# Each menu in menus_dir is its own provider, named after the menu, and takes a prefix here.
+"?" = "keybinds"
+"!" = "screenshots"
 
 [[runner_commands]]
 name = "Edit Config"

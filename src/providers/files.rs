@@ -39,8 +39,8 @@ fn wants_index(config: &Config) -> bool {
 }
 
 impl Provider for LazyFilesProvider {
-    fn name(&self) -> &'static str { "files" }
-    fn pretty_name(&self) -> &'static str { "Files" }
+    fn name(&self) -> &str { "files" }
+    fn pretty_name(&self) -> &str { "Files" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         // try_lock, not lock: a keystroke that lands while the watcher is draining should fall
@@ -273,8 +273,8 @@ fn is_ignored_path(path: &Path, ignored: &[String]) -> bool {
 }
 
 impl Provider for FilesProvider {
-    fn name(&self) -> &'static str { "files" }
-    fn pretty_name(&self) -> &'static str { "Files" }
+    fn name(&self) -> &str { "files" }
+    fn pretty_name(&self) -> &str { "Files" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         self.drain_events();
@@ -332,6 +332,7 @@ fn files_capability() -> ProviderCapability {
         name: "files".into(),
         name_pretty: "Files".into(),
         description: "Search indexed files and directories".into(),
+        icon: String::new(),
         prefixes: Vec::new(),
         actions: action_map(&[
             ("open", ActionCapability::new("Open")),

@@ -67,8 +67,8 @@ struct SwayProps { class: Option<String> }
 struct Window { id: String, title: String, app: String, workspace: String, backend: &'static str }
 
 impl Provider for WindowsProvider {
-    fn name(&self) -> &'static str { "windows" }
-    fn pretty_name(&self) -> &'static str { "Windows" }
+    fn name(&self) -> &str { "windows" }
+    fn pretty_name(&self) -> &str { "Windows" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         let mut out = Vec::new();
@@ -108,6 +108,7 @@ impl Provider for WindowsProvider {
             name: self.name().into(),
             name_pretty: self.pretty_name().into(),
             description: "Search, focus, and close open windows".into(),
+            icon: String::new(),
             prefixes: Vec::new(),
             actions: action_map(&[
                 ("focus", ActionCapability::new("Focus")),
