@@ -374,6 +374,7 @@ fn command_preview(command: &str) -> String {
 mod tests {
     use super::{Menu, MenuEntry, MenuProvider};
     use crate::providers::Provider;
+    use std::sync::atomic::Ordering;
 
     fn menu(raw: &str) -> Menu {
         toml::from_str(raw).unwrap()
@@ -420,9 +421,8 @@ mod tests {
 
     #[test]
     fn a_generated_menu_regenerates_when_opened() {
-        let dir = std::env::temp_dir().join(format!("epochoxide-menu-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("entries.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("entries.json");
         std::fs::write(&path, r#"[{"text":"first"}]"#).unwrap();
         let mut provider = MenuProvider::new(menu(&format!(
             "name = 'gen'\ncache_ms = 600000\ncommand = 'cat {}'\n",
@@ -430,6 +430,7 @@ mod tests {
         )));
 
         assert_eq!(provider.query("", 10, false)[0].text, "first");
+        wait_for_refresh(&provider);
         std::fs::write(&path, r#"[{"text":"second"}]"#).unwrap();
         // Searching within the menu reuses what the generator already returned ...
         assert_eq!(provider.query("fir", 10, false)[0].text, "first");
@@ -444,7 +445,15 @@ mod tests {
             }
         }
         assert_eq!(provider.query("", 10, false)[0].text, "second");
-        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn wait_for_refresh(provider: &MenuProvider) {
+        for _ in 0..50 {
+            if !provider.refreshing.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]
