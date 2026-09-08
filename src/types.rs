@@ -60,10 +60,6 @@ impl ActionCapability {
         self.confirmation = true;
         self
     }
-    pub fn needs_args(mut self) -> Self {
-        self.needs_args = true;
-        self
-    }
     pub fn async_action(mut self) -> Self {
         self.async_action = true;
         self

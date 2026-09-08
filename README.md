@@ -201,6 +201,8 @@ epochoxide query --providers files --query invoice --limit 20
 ### Runner
 
 The `runner` provider indexes executable commands from `$PATH` and optional custom commands from config.
+If the query looks like a shell command, runner also returns a `Run: ...` fallback item that executes
+the raw query in a terminal.
 
 Actions:
 
