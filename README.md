@@ -19,6 +19,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - Persistent usage history and recency-aware ranking.
 - Nix flake package, Home Manager module, and NixOS module.
 - JSON-over-Unix-socket protocol for easy shell integration.
+- Versioned Epoch API for normalized compositor state and Tailscale, independent of the launcher.
 
 ## Why
 
@@ -462,6 +463,121 @@ Response shape:
 Items carry `actions: ["open", ...]` — the action *names* available on that specific item — but not the full `ActionCapability` metadata (label, `destructive`, `needs_args`, etc.) for each one. Fetch the `providers` capability list once per session and join on `item.provider` + action name to get that metadata, rather than expecting it duplicated on every item.
 
 For the lowest latency shell integration, keep a persistent socket connection open while the launcher is visible and send a new query request for each input change.
+
+## Epoch API
+
+Alongside the launcher protocol, EpochOxide exposes a versioned API for everything that is *not*
+a launcher result: compositor state, service integrations, and system information. It is what
+`epochctl` and the shell call so neither has to know whether the session is Hyprland or niri.
+
+Three rules hold across the whole surface:
+
+1. **Normalized, not raw.** No caller ever sees a `hyprctl` payload or a `tailscale status` blob.
+2. **Discoverable.** `api.describe` reports the version, every group and method, and whether each
+   group is usable on this machine, so a shell can feature-detect instead of parsing error text.
+3. **Typed failures.** Errors carry a machine-readable `code`.
+
+### Discovery
+
+```bash
+epochoxide api api.describe
+```
+
+```text
+contract version: 1.0
+  compositor   available    7 methods
+  tailscale    available    3 methods
+  capture      planned      0 methods   not implemented in this build
+  localsend    planned      0 methods   not implemented in this build
+  dev          planned      0 methods   not implemented in this build
+  nix          planned      0 methods   not implemented in this build
+  system       planned      0 methods   not implemented in this build
+```
+
+Groups marked `planned` are part of the contract but not implemented; they answer with
+`code: "unavailable"` rather than an empty result, so a caller can tell "not built yet" from
+"nothing to report". A group can also be `unavailable` at runtime — `tailscale` is, when the CLI
+is not installed.
+
+### Compositor
+
+```bash
+epochoxide api compositor.windows
+epochoxide api compositor.activeWindow
+epochoxide api compositor.workspaces
+epochoxide api compositor.monitors
+epochoxide api compositor.focusWindow    --params '{"id":"hypr:0x5a6557dd9b40"}'
+epochoxide api compositor.closeWindow    --params '{"id":"hypr:0x5a6557dd9b40"}'
+epochoxide api compositor.focusWorkspace --params '{"id":"3"}'
+```
+
+`focusWorkspace` takes either the qualified `id` from `compositor.workspaces` (`hypr:3`) or a bare
+name or number, so a keybinding does not have to know which compositor it is on. A workspace that
+does not exist yet is created, matching the compositors' own behaviour.
+
+Windows, workspaces, and monitors come back in one shape whatever the compositor:
+
+```json
+{
+  "id": "hypr:0x5a6557dd9b40",
+  "app_id": "com.mitchellh.ghostty",
+  "title": "thor: omarchy",
+  "workspace": "4",
+  "monitor": "eDP-1",
+  "focused": true,
+  "floating": false
+}
+```
+
+`id` is backend-qualified and round-trips: pass it straight back to `focusWindow`. Hyprland
+reports a window's monitor as an index and niri reports workspaces by id — both are resolved to
+names here so the shell never has to.
+
+Backends live one per file under `src/compositor/`, each an implementation of the `Compositor`
+trait. Hyprland, niri, and sway are supported, with wmctrl as an X11 fallback that can only list
+and focus windows. The backend that answers is detected at call time, so a compositor restart
+does not need a daemon restart. Adding one means adding a module and a line in `backends()`.
+
+### Tailscale
+
+```bash
+epochoxide api tailscale.status
+epochoxide api tailscale.machines
+epochoxide api tailscale.send --params '{"peer":"phone","files":["/home/you/notes.pdf"]}'
+```
+
+`status` normalizes backend state, tailnet, exit node, and health warnings. `machines` lists this
+device first, then peers by name.
+
+One deliberate divergence from what Tailscale reports: for *this* device, `online` follows the
+backend state rather than `Self.Online`, which Tailscale sets false whenever it cannot reach the
+coordination server — even with the tailnet up. Showing the local machine as offline next to a
+status of `Running` would be a contradiction, so the normalization resolves it.
+
+### Over the socket
+
+```json
+{"type":"api","method":"compositor.windows","params":{},"version":1}
+```
+
+`params` and `version` are optional. Responses use the usual envelope; a failure carries the
+structured error in `data`:
+
+```json
+{"ok":false,"data":{"code":"unavailable","message":"...","detail":null},"error":"..."}
+```
+
+Error codes: `unknown_group`, `unknown_method`, `unavailable`, `invalid_params`, `backend_error`,
+`version_mismatch`.
+
+API calls are answered without waiting on the provider registry, so a cold daemon still building
+its file index can answer `compositor.windows` immediately.
+
+### Versioning
+
+`version` asserts the contract major the caller was built against; a mismatch is refused rather
+than served a shape the caller may not understand. The major changes when an existing method's
+shape changes incompatibly — adding a group, method, or field is a minor bump.
 
 ## Nix
 

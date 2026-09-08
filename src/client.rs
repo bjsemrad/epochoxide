@@ -118,3 +118,24 @@ pub fn subscribe(
         Err(err) => Some(Err(err)),
     }))
 }
+
+/// Like [`request`], but hands back the whole `{ok, data, error}` envelope instead of unwrapping
+/// `data` and turning `ok: false` into an error.
+///
+/// The API surface answers failures with a structured payload carrying a machine-readable `code`.
+/// Going through `request` would flatten that to the message string, so an `api` call would lose
+/// its code whenever a daemon happened to be running and keep it when one was not.
+pub fn request_envelope(socket: &str, payload: Value) -> Result<Option<Value>> {
+    let mut client = match StreamClient::connect(socket) {
+        Ok(client) => client,
+        Err(_) => return Ok(None),
+    };
+    client.send(&payload)?;
+    let mut line = String::new();
+    match client.reader.read_line(&mut line) {
+        Ok(0) => Ok(None),
+        Ok(_) if line.trim().is_empty() => Ok(None),
+        Ok(_) => Ok(Some(serde_json::from_str(line.trim())?)),
+        Err(err) => Err(err).context("reading daemon response"),
+    }
+}

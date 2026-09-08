@@ -1,4 +1,6 @@
+mod api;
 mod client;
+mod compositor;
 mod config;
 mod fuzzy;
 mod history;
@@ -6,6 +8,7 @@ mod icons;
 mod providers;
 mod server;
 mod service;
+mod tailscale;
 mod types;
 
 use anyhow::Result;
@@ -58,6 +61,17 @@ enum Command {
         arguments: String,
     },
     ListProviders,
+    /// Call a method on the Epoch API, e.g. `compositor.windows`.
+    Api {
+        /// Method name as `group.method`, or `api.describe` to list the contract.
+        method: String,
+        /// Parameters as a JSON object.
+        #[arg(long, default_value = "{}")]
+        params: String,
+        /// Contract major version to assert against.
+        #[arg(long)]
+        version: Option<u32>,
+    },
     Menu {
         name: String,
     },
@@ -151,6 +165,59 @@ fn main() -> Result<()> {
             registry.activate(&provider, &identifier, &action, &query, &arguments)?;
             println!("{}", json!({"ok": true}));
             Ok(())
+        }
+        Command::Api {
+            method,
+            params,
+            version,
+        } => {
+            let params: serde_json::Value = serde_json::from_str(&params)
+                .map_err(|err| anyhow::anyhow!("--params must be JSON: {err}"))?;
+            // Prefer the warm daemon; fall back to answering in-process so the CLI still works
+            // with no daemon running.
+            let answered = client::request_envelope(
+                &config.socket,
+                serde_json::json!({
+                    "type": "api",
+                    "method": method.clone(),
+                    "params": params.clone(),
+                    "version": version,
+                }),
+            )?;
+            let local = || match api::dispatch(&method, &params, version) {
+                Ok(data) => (true, data),
+                Err(err) => (false, err.to_value()),
+            };
+            let (ok, data) = match answered {
+                Some(envelope) => {
+                    let ok = envelope
+                        .get("ok")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let data = envelope
+                        .get("data")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    // A daemon predating the API rejects the request as unparseable rather than
+                    // answering with a structured error, so its reply carries no `code`. That is
+                    // version skew, not a real failure: answer in-process rather than reporting
+                    // the daemon's parse error to the user.
+                    if !ok && data.get("code").is_none() {
+                        local()
+                    } else {
+                        (ok, data)
+                    }
+                }
+                // No daemon at all: answer in-process so the CLI works on a cold machine.
+                None => local(),
+            };
+            if ok {
+                println!("{}", serde_json::to_string_pretty(&data)?);
+                Ok(())
+            } else {
+                eprintln!("{}", serde_json::to_string_pretty(&data)?);
+                std::process::exit(1);
+            }
         }
         Command::ListProviders => {
             if let Some(response) =

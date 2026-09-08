@@ -2,7 +2,7 @@ use crate::providers::Registry;
 use anyhow::{Context, Result};
 use notify::Watcher;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
@@ -38,6 +38,12 @@ enum Request {
     },
     Subscribe {
         providers: Option<Vec<String>>,
+    },
+    Api {
+        method: String,
+        params: Option<Value>,
+        /// Contract major the caller was built against; refused when it is not this build's.
+        version: Option<u32>,
     },
 }
 
@@ -275,6 +281,28 @@ fn handle_client(mut stream: UnixStream, startup: Arc<Startup>) -> Result<()> {
                     data: registry.menu(&menu),
                     error: None::<String>,
                 })?
+            }
+            // API calls answer from compositor and service state, not from providers, so they
+            // are served without waiting on the registry -- a cold start still building the file
+            // index can answer compositor.windows immediately.
+            Ok(Request::Api {
+                method,
+                params,
+                version,
+            }) => {
+                let params = params.unwrap_or(Value::Null);
+                match crate::api::dispatch(&method, &params, version) {
+                    Ok(data) => serde_json::to_value(Response {
+                        ok: true,
+                        data,
+                        error: None::<String>,
+                    })?,
+                    Err(err) => serde_json::to_value(Response {
+                        ok: false,
+                        data: err.to_value(),
+                        error: Some(err.message.clone()),
+                    })?,
+                }
             }
             Ok(Request::Subscribe { providers }) => {
                 let registry = startup.wait_registry()?;
