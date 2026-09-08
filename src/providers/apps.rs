@@ -151,7 +151,7 @@ fn parse_desktop(path: &Path) -> Result<DesktopEntry> {
             continue;
         }
         if !in_entry { continue; }
-        match key.split('[').next().unwrap_or(key) {
+        match key {
             "Name" if app.name.is_empty() => app.name = val.to_string(),
             "GenericName" if app.generic_name.is_empty() => app.generic_name = val.to_string(),
             "Comment" if app.comment.is_empty() => app.comment = val.to_string(),
@@ -191,6 +191,16 @@ mod tests {
     #[test]
     fn removes_desktop_exec_field_codes() {
         assert_eq!(clean_exec("firefox %u"), "firefox");
+    }
+
+    #[test]
+    fn ignores_localized_name_variants_regardless_of_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blueman-manager.desktop");
+        std::fs::write(&path, "[Desktop Entry]\nName[de]=Bluetooth-Verwaltung\nName=Bluetooth Manager\nComment[de]=Verwalten Sie Bluetooth-Geräte\nComment=Manage Bluetooth devices\n").unwrap();
+        let app = parse_desktop(&path).unwrap();
+        assert_eq!(app.name, "Bluetooth Manager");
+        assert_eq!(app.comment, "Manage Bluetooth devices");
     }
 
     #[test]
