@@ -2,7 +2,7 @@ use super::{command_output, run_shell, Provider};
 use crate::{fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
 use anyhow::Result;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, io::{Read, Write}, os::unix::net::UnixStream, path::PathBuf, time::Duration};
 
 pub struct WindowsProvider { wm_class_icons: HashMap<String, String> }
 
@@ -48,13 +48,13 @@ impl Provider for WindowsProvider {
     fn activate(&mut self, identifier: &str, action: &str, _query: &str, _arguments: &str) -> Result<()> {
         let Some((backend, id)) = identifier.split_once(':') else { return Ok(()); };
         match (action, backend) {
-            ("focus", "hypr") => run_shell(&format!("hyprctl dispatch focuswindow address:{id}")),
+            ("focus", "hypr") => hypr_activate(&format!("dispatch focuswindow address:{id}")),
             ("focus", "sway") => run_shell(&format!("swaymsg '[con_id={id}] focus'")),
-            ("focus", "niri") => run_shell(&format!("niri msg action focus-window --id {id}")),
+            ("focus", "niri") => run_shell(&format!("{} msg action focus-window --id {id}", niri_shell())),
             ("focus", "wmctrl") => run_shell(&format!("wmctrl -ia {id}")),
-            ("close", "hypr") => run_shell(&format!("hyprctl dispatch closewindow address:{id}")),
+            ("close", "hypr") => hypr_activate(&format!("dispatch closewindow address:{id}")),
             ("close", "sway") => run_shell(&format!("swaymsg '[con_id={id}] kill'")),
-            ("close", "niri") => run_shell(&format!("niri msg action close-window --id {id}")),
+            ("close", "niri") => run_shell(&format!("{} msg action close-window --id {id}", niri_shell())),
             ("close", "wmctrl") => run_shell(&format!("wmctrl -ic {id}")),
             _ => anyhow::bail!("unsupported windows action: {action}"),
         }
@@ -80,31 +80,38 @@ impl Provider for WindowsProvider {
 }
 
 fn discover_windows() -> Vec<Window> {
-    match detect_backend() {
-        Backend::Hypr => hypr_windows().or_else(wmctrl_windows),
-        Backend::Sway => sway_windows().or_else(wmctrl_windows),
-        Backend::Niri => niri_windows().or_else(wmctrl_windows),
-        Backend::Wmctrl => wmctrl_windows(),
-    }.unwrap_or_default()
+    let backends = candidate_backends();
+    for name in backends {
+        let windows = match name {
+            "hypr" => hypr_windows(),
+            "sway" => sway_windows(),
+            "niri" => niri_windows(),
+            _ => wmctrl_windows(),
+        };
+        if let Some(windows) = windows { return windows; }
+    }
+    Vec::new()
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Backend { Hypr, Sway, Niri, Wmctrl }
-
-fn detect_backend() -> Backend {
-    let hypr = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE");
-    let sway = std::env::var_os("SWAYSOCK");
-    let niri = std::env::var_os("NIRI_SOCKET");
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
-    detect_from_env(hypr.is_some(), sway.is_some(), niri.is_some(), desktop.as_deref())
+/// Returns compositor backends to try in order. Env hints pick the preferred
+/// backend; without them (typical under systemd), each backend probes its own
+/// IPC/CLI path and we fall back to wmctrl last.
+fn candidate_backends() -> Vec<&'static str> {
+    match backend_from_env() {
+        Backend::Hypr => vec!["hypr", "niri", "sway", "wmctrl"],
+        Backend::Sway => vec!["sway", "hypr", "niri", "wmctrl"],
+        Backend::Niri => vec!["niri", "hypr", "sway", "wmctrl"],
+        // No env hint (typical under systemd): probe everything.
+        Backend::Wmctrl => vec!["hypr", "niri", "sway", "wmctrl"],
+    }
 }
 
-fn detect_from_env(hypr: bool, sway: bool, niri: bool, desktop: Option<&str>) -> Backend {
-    if hypr { return Backend::Hypr; }
-    if sway { return Backend::Sway; }
-    if niri { return Backend::Niri; }
-    if let Some(d) = desktop {
-        let d = d.to_lowercase();
+fn backend_from_env() -> Backend {
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() { return Backend::Hypr; }
+    if std::env::var_os("SWAYSOCK").is_some() { return Backend::Sway; }
+    if std::env::var_os("NIRI_SOCKET").is_some() { return Backend::Niri; }
+    if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+        let d = desktop.to_lowercase();
         if d.contains("hypr") { return Backend::Hypr; }
         if d.contains("sway") { return Backend::Sway; }
         if d.contains("niri") { return Backend::Niri; }
@@ -112,8 +119,12 @@ fn detect_from_env(hypr: bool, sway: bool, niri: bool, desktop: Option<&str>) ->
     Backend::Wmctrl
 }
 
+/// Active backend based on environment hints only.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Backend { Hypr, Sway, Niri, Wmctrl }
+
 fn hypr_windows() -> Option<Vec<Window>> {
-    let raw = command_output("hyprctl", &["clients", "-j"])?;
+    let raw = hypr_ipc("j/clients").or_else(|| hypr_output(&["clients", "-j"]))?;
     let clients: Vec<HyprClient> = serde_json::from_str(&raw).ok()?;
     Some(clients.into_iter().map(|c| Window { id: c.address, title: c.title, app: c.class, workspace: c.workspace.name, backend: "hypr" }).collect())
 }
@@ -136,7 +147,7 @@ fn collect_sway(node: &SwayNode, out: &mut Vec<Window>) {
 }
 
 fn niri_windows() -> Option<Vec<Window>> {
-    let raw = command_output("niri", &["msg", "--json", "windows"])?;
+    let raw = niri_output(&["msg", "--json", "windows"])?;
     let values: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let arr = values.as_array()?;
     Some(arr.iter().filter_map(|v| Some(Window {
@@ -161,22 +172,129 @@ fn wmctrl_windows() -> Option<Vec<Window>> {
     }).collect())
 }
 
+fn hypr_output(args: &[&str]) -> Option<String> {
+    let mut command = std::process::Command::new("hyprctl");
+    command.args(args);
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+        if let Some(sig) = hypr_signature() { command.env("HYPRLAND_INSTANCE_SIGNATURE", sig); }
+    }
+    output(command)
+}
+
+fn niri_output(args: &[&str]) -> Option<String> {
+    let mut command = std::process::Command::new("niri");
+    command.args(args);
+    if std::env::var_os("NIRI_SOCKET").is_none() {
+        if let Some(socket) = niri_socket() { command.env("NIRI_SOCKET", socket); }
+    }
+    output(command)
+}
+
+fn output(mut command: std::process::Command) -> Option<String> {
+    let out = command.output().ok()?;
+    if out.status.success() { Some(String::from_utf8_lossy(&out.stdout).trim().to_string()) } else { None }
+}
+
+fn hypr_activate(command: &str) -> Result<()> {
+    if hypr_ipc(command).is_some() { return Ok(()); }
+    run_shell(&format!("{} {command}", hypr_shell()))
+}
+
+fn hypr_ipc(command: &str) -> Option<String> {
+    let socket = hypr_socket_path()?;
+    let mut stream = UnixStream::connect(socket).ok()?;
+    let timeout = Some(Duration::from_millis(300));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    stream.write_all(command.as_bytes()).ok()?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut out = String::new();
+    stream.read_to_string(&mut out).ok()?;
+    if out.trim().is_empty() { None } else { Some(out.trim().to_string()) }
+}
+
+fn hypr_socket_path() -> Option<PathBuf> {
+    let sig = hypr_signature()?;
+    let socket = std::path::Path::new(&runtime_dir()).join("hypr").join(sig).join(".socket.sock");
+    socket.exists().then_some(socket)
+}
+
+fn hypr_shell() -> String {
+    hypr_signature().map(|sig| format!("HYPRLAND_INSTANCE_SIGNATURE={} hyprctl", shell_quote(&sig))).unwrap_or_else(|| "hyprctl".into())
+}
+
+fn niri_shell() -> String {
+    niri_socket().map(|socket| format!("NIRI_SOCKET={} niri", shell_quote(&socket))).unwrap_or_else(|| "niri".into())
+}
+
+fn hypr_signature() -> Option<String> {
+    if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") { if !sig.is_empty() { return Some(sig); } }
+    let rt = runtime_dir();
+    let dir = std::path::Path::new(&rt).join("hypr");
+    let mut latest: Option<(std::time::SystemTime, String)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if !path.join(".socket.sock").exists() { continue; }
+        let sig = entry.file_name().to_string_lossy().to_string();
+        let modified = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if latest.as_ref().is_none_or(|(time, _)| modified > *time) { latest = Some((modified, sig)); }
+    }
+    latest.map(|(_, sig)| sig)
+}
+
+fn niri_socket() -> Option<String> {
+    if let Ok(socket) = std::env::var("NIRI_SOCKET") { if !socket.is_empty() { return Some(socket); } }
+    let rt = runtime_dir();
+    [format!("{rt}/niri.sock"), format!("{rt}/niri-ipc/niri.sock")].into_iter().find(|p| std::path::Path::new(p).exists())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn runtime_dir() -> String {
+    std::env::var("XDG_RUNTIME_DIR")
+        .or_else(|_| std::env::var("UID").map(|uid| format!("/run/user/{uid}")))
+        .unwrap_or_else(|_| "/run/user/1000".into())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{detect_from_env, Backend};
+    use super::{backend_from_env, Backend};
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    /// Tests mutate process env vars, which are global. Serialize them.
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn set(vars: &[(&str, &str)]) {
+        for (k, v) in vars { std::env::set_var(k, v); }
+        for k in ["SWAYSOCK", "NIRI_SOCKET", "HYPRLAND_INSTANCE_SIGNATURE", "XDG_CURRENT_DESKTOP"] {
+            if !vars.iter().any(|(kk, _)| *kk == k) { std::env::remove_var(k); }
+        }
+    }
 
     #[test]
     fn detects_hyprland_from_instance_signature() {
-        assert_eq!(detect_from_env(true, false, false, None), Backend::Hypr);
+        let _g = lock_env();
+        set(&[("HYPRLAND_INSTANCE_SIGNATURE", "s")]);
+        assert_eq!(backend_from_env(), Backend::Hypr);
     }
 
     #[test]
     fn detects_niri_from_xdg_desktop() {
-        assert_eq!(detect_from_env(false, false, false, Some("niri")), Backend::Niri);
+        let _g = lock_env();
+        set(&[("XDG_CURRENT_DESKTOP", "niri")]);
+        assert_eq!(backend_from_env(), Backend::Niri);
     }
 
     #[test]
     fn defaults_to_wmctrl_without_signals() {
-        assert_eq!(detect_from_env(false, false, false, None), Backend::Wmctrl);
+        let _g = lock_env();
+        set(&[]);
+        assert_eq!(backend_from_env(), Backend::Wmctrl);
     }
 }

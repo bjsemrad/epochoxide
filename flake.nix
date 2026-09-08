@@ -150,6 +150,13 @@
           package = cfg.package;
           socket = cfg.socket;
           runtimePath = lib.makeBinPath cfg.runtimePackages;
+          # Compositor CLIs (hyprctl, niri, swaymsg) are usually already
+          # installed through the NixOS system or user profile rather than
+          # declared here. Append those profile bin paths so the windows
+          # provider can reach them without making EpochOxide depend on a
+          # specific compositor.
+          profilePath = "/run/current-system/sw/bin:${config.home.profileDirectory}/bin";
+          servicePath = lib.concatStringsSep ":" (lib.filter (p: p != "") [ runtimePath profilePath ]);
         in
         {
           options.programs.epochoxide = {
@@ -197,7 +204,7 @@
               Service = {
                 Type = "simple";
                 ExecStart = "${package}/bin/epochoxide serve --socket ${socket}";
-                Environment = "PATH=${runtimePath}";
+                Environment = "PATH=${servicePath}";
                 Restart = "on-failure";
                 RestartSec = 1;
               };
@@ -217,6 +224,8 @@
           cfg = config.services.epochoxide;
           package = cfg.package;
           runtimePath = lib.makeBinPath cfg.runtimePackages;
+          profilePath = "/run/current-system/sw/bin";
+          servicePath = lib.concatStringsSep ":" (lib.filter (p: p != "") [ runtimePath profilePath ]);
           tomlFormat = pkgs.formats.toml { };
           configFile = tomlFormat.generate "epochoxide-config.toml" (defaultSettings // cfg.settings);
         in
@@ -255,7 +264,7 @@
               serviceConfig = {
                 Type = "simple";
                 ExecStart = "${package}/bin/epochoxide --config ${configFile} serve --socket ${cfg.socket}";
-                Environment = "PATH=${runtimePath}";
+                Environment = "PATH=${servicePath}";
                 Restart = "on-failure";
                 RestartSec = 1;
               };
