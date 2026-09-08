@@ -91,8 +91,18 @@
               "build"
               ".direnv"
             ];
+            menus_dir = "~/.config/epochoxide/menus";
+            launch_prefix = "";
+            terminal_cmd = "";
+            clipboard_max_items = 100;
+            clipboard_image_dir = "~/.cache/epochoxide/clipboard/images";
+            # clipboard_text_editor is deliberately left unset so the daemon's own
+            # $EDITOR-sensing default keeps working for Nix-managed installs.
+            clipboard_image_editor = "";
+            clipboard_ocr = false;
+            clipboard_capture_interval_ms = 250;
             runner_scan_path = true;
-            thumbnail_cache_enabled = true;
+            runner_commands = [ ];
             provider_enabled = {
               apps = true;
               files = true;
@@ -119,6 +129,10 @@
               ":" = "menus";
               "?" = "calc";
             };
+            icon_theme = "";
+            icon_cache_dir = "~/.cache/epochoxide/icons";
+            thumbnail_cache_enabled = true;
+            persistent_index = true;
           };
         in
         {
@@ -212,8 +226,18 @@
               "build"
               ".direnv"
             ];
+            menus_dir = "~/.config/epochoxide/menus";
+            launch_prefix = "";
+            terminal_cmd = "";
+            clipboard_max_items = 100;
+            clipboard_image_dir = "~/.cache/epochoxide/clipboard/images";
+            # clipboard_text_editor is deliberately left unset so the daemon's own
+            # $EDITOR-sensing default keeps working for Nix-managed installs.
+            clipboard_image_editor = "";
+            clipboard_ocr = false;
+            clipboard_capture_interval_ms = 250;
             runner_scan_path = true;
-            thumbnail_cache_enabled = true;
+            runner_commands = [ ];
             provider_enabled = {
               apps = true;
               files = true;
@@ -240,6 +264,10 @@
               ":" = "menus";
               "?" = "calc";
             };
+            icon_theme = "";
+            icon_cache_dir = "~/.cache/epochoxide/icons";
+            thumbnail_cache_enabled = true;
+            persistent_index = true;
           };
           configFile = tomlFormat.generate "epochoxide-config.toml" (defaultSettings // cfg.settings);
         in

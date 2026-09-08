@@ -11,6 +11,10 @@ clipboard_image_editor = ""
 clipboard_ocr = false
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
+icon_theme = ""
+icon_cache_dir = "~/.cache/epochoxide/icons"
+thumbnail_cache_enabled = true
+persistent_index = true
 
 [provider_enabled]
 apps = true
@@ -37,9 +41,6 @@ clipboard = 0
 "@" = "windows"
 ":" = "menus"
 "?" = "calc"
-
-icon_theme = ""
-thumbnail_cache_enabled = true
 
 [[runner_commands]]
 name = "Edit Config"
