@@ -166,9 +166,10 @@ impl Registry {
                 .map(|&i| {
                     let provider = &self.providers[i];
                     let history = &self.history;
+                    let name = self.capabilities[i].name.clone();
                     let weight = config
                         .provider_weights
-                        .get(&self.capabilities[i].name)
+                        .get(&name)
                         .copied()
                         .unwrap_or_default();
                     scope.spawn(move || {
@@ -176,7 +177,9 @@ impl Registry {
                         let history = history.read().unwrap();
                         for item in &mut items {
                             item.score += weight;
-                            history.apply(item, query);
+                            if applies_history(&name) {
+                                history.apply(item, query);
+                            }
                         }
                         items
                     })
@@ -262,7 +265,9 @@ impl Registry {
                     let history = history.read().unwrap();
                     for item in &mut items {
                         item.score += weight;
-                        history.apply(item, &query);
+                        if applies_history(&name) {
+                            history.apply(item, &query);
+                        }
                     }
                 }
                 items.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.text.cmp(&b.text)));
@@ -309,6 +314,10 @@ fn enabled(config: &Config, provider: &str) -> bool {
         .get(provider)
         .copied()
         .unwrap_or(true)
+}
+
+fn applies_history(provider: &str) -> bool {
+    provider != "clipboard"
 }
 
 pub fn copy_text(text: &str) -> Result<()> {

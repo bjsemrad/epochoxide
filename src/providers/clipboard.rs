@@ -45,13 +45,11 @@ struct ClipboardStore {
 
 impl ClipboardStore {
     fn capture_current(&self) {
-        if self.capture_text().unwrap_or(false) {
+        if let Some(mime) = current_clipboard_image_mime() {
+            let _ = self.capture_image(&mime);
             return;
         }
-        let Some(mime) = current_clipboard_image_mime() else {
-            return;
-        };
-        let _ = self.capture_image(&mime);
+        let _ = self.capture_text();
     }
 
     fn capture_text(&self) -> Result<bool> {
