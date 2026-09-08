@@ -3,9 +3,58 @@ use crate::{config::{expand, Config}, fuzzy, types::{action_map, ActionCapabilit
 use anyhow::{Context, Result};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::{Path, PathBuf}, process::{Command, Stdio}, sync::mpsc::{self, Receiver}, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet}, fs, path::{Path, PathBuf}, process::{Command, Stdio}, sync::{mpsc::{self, Receiver}, Arc, Mutex}, thread, time::{Duration, Instant}};
 
 const SAVE_DEBOUNCE: Duration = Duration::from_secs(3);
+const QUERY_CANDIDATE_LIMIT: usize = 5_000;
+
+pub struct LazyFilesProvider {
+    config: Config,
+    inner: Arc<Mutex<Option<FilesProvider>>>,
+}
+
+impl LazyFilesProvider {
+    pub fn new(config: Config) -> Self {
+        let inner = Arc::new(Mutex::new(None));
+        let load_inner = Arc::clone(&inner);
+        let load_config = config.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(30));
+            let start = Instant::now();
+            let provider = FilesProvider::new(load_config);
+            eprintln!("files provider ready in {:?} ({} entries)", start.elapsed(), provider.files.len());
+            *load_inner.lock().unwrap() = Some(provider);
+        });
+        Self { config, inner }
+    }
+}
+
+impl Provider for LazyFilesProvider {
+    fn name(&self) -> &'static str { "files" }
+    fn pretty_name(&self) -> &'static str { "Files" }
+
+    fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
+        let fallback = fd_query(&self.config, query, limit, exact);
+        if !fallback.is_empty() { return fallback; }
+        let Ok(mut inner) = self.inner.try_lock() else { return fd_query(&self.config, query, limit, exact); };
+        let Some(provider) = inner.as_mut() else { return fd_query(&self.config, query, limit, exact); };
+        provider.query(query, limit, exact)
+    }
+
+    fn activate(&mut self, identifier: &str, action: &str, query: &str, arguments: &str) -> Result<()> {
+        let Ok(mut inner) = self.inner.try_lock() else { return Ok(()); };
+        let Some(provider) = inner.as_mut() else { return Ok(()); };
+        provider.activate(identifier, action, query, arguments)
+    }
+
+    fn events(&mut self) -> Vec<serde_json::Value> {
+        let Ok(mut inner) = self.inner.try_lock() else { return Vec::new(); };
+        let Some(provider) = inner.as_mut() else { return Vec::new(); };
+        provider.events()
+    }
+
+    fn capability(&self) -> ProviderCapability { files_capability() }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct IndexedFile { path: PathBuf, display: String, search: String, #[serde(skip)] mask: u64 }
@@ -13,6 +62,9 @@ struct IndexedFile { path: PathBuf, display: String, search: String, #[serde(ski
 pub struct FilesProvider {
     config: Config,
     files: HashMap<String, IndexedFile>,
+    trigrams: HashMap<[u8; 3], Vec<u32>>,
+    trigram_keys: Vec<String>,
+    trigram_ids: HashMap<String, u32>,
     watcher: Option<RecommendedWatcher>,
     events: Option<Receiver<notify::Result<Event>>>,
     changed: bool,
@@ -26,7 +78,7 @@ impl FilesProvider {
     pub fn new(config: Config) -> Self {
         let cache_path = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("epochoxide/file-index.json");
         let ignored_dirs = config.ignored_dirs.iter().map(|i| expand(i)).collect();
-        let mut this = Self { config, files: HashMap::new(), watcher: None, events: None, changed: false, cache_path, ignored_dirs, dirty: false, last_saved: None };
+        let mut this = Self { config, files: HashMap::new(), trigrams: HashMap::new(), trigram_keys: Vec::new(), trigram_ids: HashMap::new(), watcher: None, events: None, changed: false, cache_path, ignored_dirs, dirty: false, last_saved: None };
         if !this.load_cache() { this.reindex(); }
         this.start_watcher();
         this
@@ -34,6 +86,9 @@ impl FilesProvider {
 
     fn reindex(&mut self) {
         self.files.clear();
+        self.trigrams.clear();
+        self.trigram_keys.clear();
+        self.trigram_ids.clear();
         for root in self.config.file_roots.clone() {
             let root = PathBuf::from(expand(&root));
             self.add_tree(&root);
@@ -45,10 +100,26 @@ impl FilesProvider {
         if !self.config.persistent_index { return false; }
         let Some(files) = fs::read_to_string(&self.cache_path).ok().and_then(|raw| serde_json::from_str::<HashMap<String, IndexedFile>>(&raw).ok()) else { return false; };
         self.files = files.into_iter()
-            .filter(|(_, f)| f.path.exists() && !self.is_ignored(&f.path))
+            .filter(|(_, f)| !self.is_ignored(&f.path))
             .map(|(k, mut f)| { f.mask = fuzzy::mask(&f.search); (k, f) })
             .collect();
+        self.rebuild_trigrams();
         !self.files.is_empty()
+    }
+
+    fn rebuild_trigrams(&mut self) {
+        let mut trigrams = HashMap::new();
+        let mut trigram_keys = Vec::with_capacity(self.files.len());
+        let mut trigram_ids = HashMap::with_capacity(self.files.len());
+        for (id, (key, f)) in self.files.iter().enumerate() {
+            let id = id as u32;
+            trigram_keys.push(key.clone());
+            trigram_ids.insert(key.clone(), id);
+            add_trigrams(&mut trigrams, id, &f.search);
+        }
+        self.trigrams = trigrams;
+        self.trigram_keys = trigram_keys;
+        self.trigram_ids = trigram_ids;
     }
 
     fn save_cache(&self) -> Result<()> {
@@ -116,14 +187,51 @@ impl FilesProvider {
     fn add_path(&mut self, path: &Path) {
         let display = path.display().to_string();
         let search = display.to_lowercase();
+        if self.files.get(&display).map(|f| f.search.as_str()) == Some(search.as_str()) { return; }
         let mask = fuzzy::mask(&search);
+        let id = self.trigram_id(&display);
+        add_trigrams(&mut self.trigrams, id, &search);
         self.files.insert(display.clone(), IndexedFile { path: path.to_path_buf(), display, search, mask });
     }
 
     fn remove_path(&mut self, path: &Path) {
         let display = path.display().to_string();
         let prefix = format!("{display}/");
-        self.files.retain(|key, _| key != &display && !key.starts_with(&prefix));
+        let removed = self.files.keys().filter(|key| *key == &display || key.starts_with(&prefix)).cloned().collect::<Vec<_>>();
+        for key in removed {
+            self.files.remove(&key);
+        }
+    }
+
+    fn trigram_id(&mut self, key: &str) -> u32 {
+        if let Some(id) = self.trigram_ids.get(key) { return *id; }
+        let id = self.trigram_keys.len() as u32;
+        self.trigram_keys.push(key.to_string());
+        self.trigram_ids.insert(key.to_string(), id);
+        id
+    }
+
+    fn candidate_keys(&self, query: &str) -> Option<Vec<&str>> {
+        let query_trigrams = unique_trigrams(query);
+        if query_trigrams.is_empty() { return None; }
+
+        let mut lists = Vec::with_capacity(query_trigrams.len());
+        for trigram in query_trigrams {
+            let Some(ids) = self.trigrams.get(&trigram) else { return Some(Vec::new()); };
+            lists.push(ids);
+        }
+
+        let first = lists.iter().copied().min_by_key(|keys| keys.len())?;
+        let other_sets = lists.into_iter()
+            .filter(|keys| !std::ptr::eq(*keys, first))
+            .map(|keys| keys.iter().copied().collect::<HashSet<_>>())
+            .collect::<Vec<_>>();
+
+        Some(first.iter()
+            .filter(|id| other_sets.iter().all(|set| set.contains(id)))
+            .filter_map(|id| self.trigram_keys.get(*id as usize).map(String::as_str))
+            .take(QUERY_CANDIDATE_LIMIT)
+            .collect())
     }
 
     fn is_ignored(&self, path: &Path) -> bool {
@@ -147,14 +255,20 @@ impl Provider for FilesProvider {
         let query_lower = query.to_lowercase();
         let query_mask = fuzzy::mask(&query_lower);
         let mut out = Vec::new();
-        for f in self.files.values() {
+        let candidates = self.candidate_keys(&query_lower);
+        let files: Box<dyn Iterator<Item = &IndexedFile> + '_> = if let Some(keys) = &candidates {
+            Box::new(keys.iter().filter_map(|key| self.files.get(*key)))
+        } else {
+            Box::new(self.files.values())
+        };
+        for f in files {
             if f.mask & query_mask != query_mask { continue; }
             if let Some((score, info)) = fuzzy::score_lower(&query_lower, &f.search, exact, "text") {
                 let mut item = Item::new(self.name(), &f.display, &f.display);
                 item.item_type = ItemType::File;
                 item.preview = f.display.clone();
                 item.preview_type = "file".into();
-                item.icon = if f.path.is_dir() { "folder".into() } else { "text-x-generic".into() };
+                item.icon = "text-x-generic".into();
                 item.actions = vec!["open".into(), "open_dir".into(), "copy_path".into(), "copy_file".into()];
                 item.score = score;
                 item.fuzzyinfo = Some(info);
@@ -194,25 +308,82 @@ impl Provider for FilesProvider {
     }
 
     fn capability(&self) -> ProviderCapability {
-        ProviderCapability {
-            name: self.name().into(),
-            name_pretty: self.pretty_name().into(),
-            description: "Search indexed files and directories".into(),
-            prefixes: Vec::new(),
-            actions: action_map(&[
-                ("open", ActionCapability::new("Open")),
-                ("open_dir", ActionCapability::new("Open Directory")),
-                ("copy_path", ActionCapability::new("Copy Path")),
-                ("copy_file", ActionCapability::new("Copy File Content")),
-                ("reindex", ActionCapability::new("Reindex").async_action()),
-            ]),
-            supports_query: true,
-            supports_activate: true,
-            supports_streaming: true,
-            supports_subscriptions: true,
-            emits_events: true,
-        }
+        files_capability()
     }
+}
+
+fn files_capability() -> ProviderCapability {
+    ProviderCapability {
+        name: "files".into(),
+        name_pretty: "Files".into(),
+        description: "Search indexed files and directories".into(),
+        prefixes: Vec::new(),
+        actions: action_map(&[
+            ("open", ActionCapability::new("Open")),
+            ("open_dir", ActionCapability::new("Open Directory")),
+            ("copy_path", ActionCapability::new("Copy Path")),
+            ("copy_file", ActionCapability::new("Copy File Content")),
+            ("reindex", ActionCapability::new("Reindex").async_action()),
+        ]),
+        supports_query: true,
+        supports_activate: true,
+        supports_streaming: true,
+        supports_subscriptions: true,
+        emits_events: true,
+    }
+}
+
+fn fd_query(config: &Config, query: &str, limit: usize, exact: bool) -> Vec<Item> {
+    if query.is_empty() { return Vec::new(); }
+    let program = if Command::new("fd").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok() { "fd" } else { "fdfind" };
+    let mut command = Command::new(program);
+    command.arg(query);
+    for root in &config.file_roots { command.arg(expand(root)); }
+    command.args(["--ignore-vcs", "--type", "file", "--type", "directory", "--max-results", &limit.saturating_mul(3).max(limit).to_string()]);
+
+    let Ok(out) = command.output() else { return Vec::new(); };
+    if !out.status.success() { return Vec::new(); }
+
+    let query_lower = query.to_lowercase();
+    let mut items = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|path| {
+            let search = path.to_lowercase();
+            let (score, info) = fuzzy::score_lower(&query_lower, &search, exact, "text")?;
+            let mut item = Item::new("files", path, path);
+            item.item_type = ItemType::File;
+            item.preview = path.to_string();
+            item.preview_type = "file".into();
+            item.icon = "text-x-generic".into();
+            item.actions = vec!["open".into(), "open_dir".into(), "copy_path".into(), "copy_file".into()];
+            item.score = score;
+            item.fuzzyinfo = Some(info);
+            Some(item)
+        })
+        .collect::<Vec<_>>();
+    items.sort_by_key(|item| std::cmp::Reverse(item.score));
+    items.truncate(limit);
+    items
+}
+
+fn add_trigrams(index: &mut HashMap<[u8; 3], Vec<u32>>, id: u32, search: &str) {
+    for trigram in unique_trigrams(search) {
+        let ids = index.entry(trigram).or_default();
+        if ids.last().copied() != Some(id) { ids.push(id); }
+    }
+}
+
+fn unique_trigrams(s: &str) -> Vec<[u8; 3]> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 3 { return Vec::new(); }
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for window in bytes.windows(3) {
+        let trigram = [window[0], window[1], window[2]];
+        if seen.insert(trigram) { out.push(trigram); }
+    }
+    out
 }
 
 fn copy_text(text: &str) -> Result<()> {
@@ -232,7 +403,7 @@ mod tests {
     fn test_provider() -> FilesProvider {
         let config = Config::default();
         let ignored_dirs = config.ignored_dirs.iter().map(|i| expand(i)).collect();
-        FilesProvider { config, files: Default::default(), watcher: None, events: None, changed: false, cache_path: PathBuf::new(), ignored_dirs, dirty: false, last_saved: None }
+        FilesProvider { config, files: Default::default(), trigrams: Default::default(), trigram_keys: Default::default(), trigram_ids: Default::default(), watcher: None, events: None, changed: false, cache_path: PathBuf::new(), ignored_dirs, dirty: false, last_saved: None }
     }
 
     #[test]
@@ -240,6 +411,26 @@ mod tests {
         let mut provider = test_provider();
         provider.files.insert("/tmp/foo".into(), super::IndexedFile { path: PathBuf::from("/tmp/foo"), display: "/tmp/foo".into(), search: "/tmp/foo".into(), mask: 0 });
         assert!(provider.query("", 20, false).is_empty());
+    }
+
+    #[test]
+    fn trigram_candidates_intersect_query_trigrams() {
+        let mut provider = test_provider();
+        provider.add_path(Path::new("/tmp/lib-alpha.txt"));
+        provider.add_path(Path::new("/tmp/lib-beta.txt"));
+        provider.add_path(Path::new("/tmp/bin-alpha.txt"));
+
+        let candidates = provider.candidate_keys("lib").unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|path| path.contains("lib")));
+    }
+
+    #[test]
+    fn missing_trigram_has_no_candidates() {
+        let mut provider = test_provider();
+        provider.add_path(Path::new("/tmp/lib-alpha.txt"));
+
+        assert_eq!(provider.candidate_keys("xyz"), Some(Vec::new()));
     }
 
     #[test]

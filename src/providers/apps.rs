@@ -39,6 +39,8 @@ impl AppsProvider {
     }
 
     fn reload(&mut self) -> Result<()> {
+        self.apps.clear();
+        let mut seen = std::collections::HashSet::new();
         let mut dirs = Vec::new();
         if let Some(data_home) = dirs::data_dir() { dirs.push(data_home.join("applications")); }
         if let Ok(data_dirs) = std::env::var("XDG_DATA_DIRS") {
@@ -53,7 +55,7 @@ impl AppsProvider {
             for entry in walkdir::WalkDir::new(&dir).follow_links(true).into_iter().filter_map(|e| e.ok()) {
                 if entry.path().extension().and_then(|e| e.to_str()) == Some("desktop") {
                     if let Ok(app) = parse_desktop(entry.path()) {
-                        if !app.name.is_empty() && self.visible(&app) {
+                        if !app.name.is_empty() && self.visible(&app) && seen.insert(app.id.clone()) {
                             self.apps.push(app);
                         }
                     }
@@ -91,7 +93,7 @@ impl Provider for AppsProvider {
                 item.subtext = if app.generic_name.is_empty() { app.comment.clone() } else { app.generic_name.clone() };
                 item.icon = app.icon.clone();
                 item.actions = vec!["open".into()];
-                item.score = score + 20_000;
+                item.score = score + 20_000 + app_name_bonus(&query_lower, &app.name);
                 item.fuzzyinfo = Some(info);
                 items.push(item);
             }
@@ -135,6 +137,13 @@ impl Provider for AppsProvider {
             emits_events: false,
         }
     }
+}
+
+fn app_name_bonus(query_lower: &str, name: &str) -> i32 {
+    if query_lower.is_empty() { return 0; }
+    let name_lower = name.to_lowercase();
+    let Some(start) = name_lower.find(query_lower) else { return 0; };
+    15_000 + if start == 0 { 5_000 } else { 0 }
 }
 
 fn parse_desktop(path: &Path) -> Result<DesktopEntry> {
@@ -186,7 +195,7 @@ fn split_list(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_exec, parse_desktop, AppsProvider, DesktopEntry};
+    use super::{app_name_bonus, clean_exec, parse_desktop, AppsProvider, DesktopEntry};
     use crate::config::Config;
 
     #[test]
@@ -226,5 +235,29 @@ mod tests {
         let icons = provider.wm_class_icons();
         assert_eq!(icons.get("foobar"), Some(&"foo-icon".to_string()));
         assert_eq!(icons.get("baz"), Some(&"baz-icon".to_string()));
+    }
+
+    #[test]
+    fn visible_name_exact_match_gets_history_sized_bonus() {
+        assert!(app_name_bonus("system info", "System Info") > 10_000);
+        assert_eq!(app_name_bonus("system info", "Thunar File Manager"), 0);
+    }
+
+    #[test]
+    fn reload_deduplicates_desktop_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("ghostty.desktop");
+        let second = dir.path().join("nested").join("ghostty.desktop");
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(&first, "[Desktop Entry]\nName=Ghostty\nExec=ghostty\n").unwrap();
+        std::fs::write(&second, "[Desktop Entry]\nName=Ghostty\nExec=ghostty\n").unwrap();
+
+        let mut seen = std::collections::HashSet::new();
+        let apps = [first, second].into_iter()
+            .filter_map(|path| parse_desktop(&path).ok())
+            .filter(|app| seen.insert(app.id.clone()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(apps.len(), 1);
     }
 }

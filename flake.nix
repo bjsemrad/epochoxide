@@ -114,6 +114,9 @@
           wmctrl
           tesseract
           libqalculate
+          imagemagick
+          librsvg
+          fd
         ];
     in
     {

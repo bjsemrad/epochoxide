@@ -3,7 +3,9 @@ use anyhow::{Context, Result};
 use notify::Watcher;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{fs, io::{BufRead, BufReader, Write}, os::unix::net::{UnixListener, UnixStream}, path::{Path, PathBuf}, sync::{mpsc, Arc, Condvar, Mutex}, thread, time::Duration};
+use std::{fs, io::{BufRead, BufReader, Write}, os::unix::net::{UnixListener, UnixStream}, path::{Path, PathBuf}, sync::{mpsc, Arc, Condvar, Mutex}, thread, time::{Duration, Instant}};
+
+const STREAM_QUERY_BUDGET: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -120,9 +122,16 @@ fn handle_client(mut stream: UnixStream, startup: Arc<Startup>) -> Result<()> {
                 let registry = startup.wait_registry()?;
                 let providers = providers.unwrap_or_default();
                 let batches = registry.query_batches(&providers, &query, limit.unwrap_or(20), exact.unwrap_or(false));
-                for (provider, items) in batches {
-                    let response = Response { ok: true, data: json!({"type": "query_batch", "provider": provider, "items": items}), error: None::<String> };
-                    writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+                let start = Instant::now();
+                while let Some(remaining) = STREAM_QUERY_BUDGET.checked_sub(start.elapsed()) {
+                    match batches.recv_timeout(remaining) {
+                        Ok((provider, items)) => {
+                            let response = Response { ok: true, data: json!({"type": "query_batch", "provider": provider, "items": items}), error: None::<String> };
+                            writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
                 }
                 serde_json::to_value(Response { ok: true, data: json!({"type": "done"}), error: None::<String> })?
             }

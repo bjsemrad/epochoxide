@@ -51,7 +51,7 @@ impl Registry {
             wm_class_icons = apps.wm_class_icons();
             providers.push(Box::new(apps));
         }
-        if enabled(&config, "files") { providers.push(Box::new(files::FilesProvider::new(config.clone()))); }
+        if enabled(&config, "files") { providers.push(Box::new(files::LazyFilesProvider::new(config.clone()))); }
         if enabled(&config, "runner") { providers.push(Box::new(runner::RunnerProvider::new(config.clone()))); }
         if enabled(&config, "clipboard") { providers.push(Box::new(clipboard::ClipboardProvider::new(config.clone())?)); }
         if enabled(&config, "windows") { providers.push(Box::new(windows::WindowsProvider::new(wm_class_icons))); }

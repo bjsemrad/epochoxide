@@ -2,7 +2,7 @@ use super::{run_shell, Provider};
 use crate::{config::Config, fuzzy, types::{action_map, ActionCapability, Item, ProviderCapability}};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Write, path::{Path, PathBuf}, process::{Command, Stdio}, time::{Duration, Instant}};
+use std::{fs, io::{Read, Write}, path::{Path, PathBuf}, process::{Command, Stdio}, sync::{Arc, Mutex}, thread};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 enum ClipKind { Text, Image }
@@ -18,58 +18,51 @@ struct Clip {
     pinned: bool,
 }
 
-pub struct ClipboardProvider {
+/// Owns clipboard state behind a `Mutex` so both `Provider` calls (query/activate, driven by
+/// client requests) and the background watcher thread (driven by clipboard changes, independent
+/// of any client) can capture new clips. Without this, history only ever advanced when a client
+/// happened to be actively searching -- copying something while the launcher was closed (or just
+/// idle) was silently lost until the next search re-checked the clipboard.
+struct ClipboardStore {
     config: Config,
-    items: Vec<Clip>,
+    items: Mutex<Vec<Clip>>,
     cache: PathBuf,
-    last_capture: Option<Instant>,
 }
 
-impl ClipboardProvider {
-    pub fn new(config: Config) -> Result<Self> {
-        let cache = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("epochoxide/clipboard.json");
-        let items = fs::read_to_string(&cache).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        Ok(Self { config, items, cache, last_capture: None })
+impl ClipboardStore {
+    fn capture_current(&self) {
+        if self.capture_text().unwrap_or(false) { return; }
+        let Some(mime) = current_clipboard_image_mime() else { return; };
+        let _ = self.capture_image(&mime);
     }
 
-    fn capture_current(&mut self) {
-        if self.last_capture.map(|t| t.elapsed() < Duration::from_millis(self.config.clipboard_capture_interval_ms)).unwrap_or(false) {
-            return;
-        }
-        self.last_capture = Some(Instant::now());
-
-        let Some(mime) = current_clipboard_mime() else { return; };
-        if mime.starts_with("image/") {
-            let _ = self.capture_image(&mime);
-        } else if mime.starts_with("text/") || mime == "UTF8_STRING" || mime == "STRING" {
-            let _ = self.capture_text();
-        }
-    }
-
-    fn capture_text(&mut self) -> Result<()> {
-        let out = Command::new("wl-paste").arg("--no-newline").output()?;
-        if !out.status.success() { return Ok(()); }
+    fn capture_text(&self) -> Result<bool> {
+        let out = Command::new("wl-paste").args(["--type", "text", "--no-newline"]).output()?;
+        if !out.status.success() { return Ok(false); }
         let text = String::from_utf8_lossy(&out.stdout).to_string();
-        if text.trim().is_empty() || self.items.first().map(|i| i.content.as_str()) == Some(text.as_str()) { return Ok(()); }
+        let mut items = self.items.lock().unwrap();
+        if text.trim().is_empty() { return Ok(true); }
+        if items.first().map(|i| i.content.as_str()) == Some(text.as_str()) { return Ok(true); }
         let id = format!("text-{:x}", stable_hash(text.as_bytes()));
-        self.items.retain(|i| i.id != id);
-        self.items.insert(0, Clip { id, kind: ClipKind::Text, content: text, image_path: None, mime: Some("text/plain".into()), ocr: String::new(), pinned: false });
-        self.compact()?;
-        Ok(())
+        items.retain(|i| i.id != id);
+        items.insert(0, Clip { id, kind: ClipKind::Text, content: text, image_path: None, mime: Some("text/plain".into()), ocr: String::new(), pinned: false });
+        self.compact(&mut items)?;
+        Ok(true)
     }
 
-    fn capture_image(&mut self, mime: &str) -> Result<()> {
+    fn capture_image(&self, mime: &str) -> Result<()> {
         let out = Command::new("wl-paste").args(["--type", mime]).output()?;
         if !out.status.success() || out.stdout.is_empty() { return Ok(()); }
         let id = format!("image-{:x}", stable_hash(&out.stdout));
-        if self.items.first().map(|i| i.id.as_str()) == Some(id.as_str()) { return Ok(()); }
+        let mut items = self.items.lock().unwrap();
+        if items.first().map(|i| i.id.as_str()) == Some(id.as_str()) { return Ok(()); }
         fs::create_dir_all(&self.config.clipboard_image_dir)?;
         let ext = image_extension(mime);
         let path = Path::new(&self.config.clipboard_image_dir).join(format!("{id}.{ext}"));
         fs::write(&path, &out.stdout)?;
         let ocr = if self.config.clipboard_ocr { run_ocr(&path).unwrap_or_default() } else { String::new() };
-        self.items.retain(|i| i.id != id);
-        self.items.insert(0, Clip {
+        items.retain(|i| i.id != id);
+        items.insert(0, Clip {
             id,
             kind: ClipKind::Image,
             content: if ocr.is_empty() { "Image clipboard item".into() } else { ocr.lines().next().unwrap_or("Image clipboard item").to_string() },
@@ -78,20 +71,54 @@ impl ClipboardProvider {
             ocr,
             pinned: false,
         });
-        self.compact()?;
-        Ok(())
+        self.compact(&mut items)
     }
 
-    fn compact(&mut self) -> Result<()> {
-        self.items.sort_by_key(|c| !c.pinned);
-        self.items.truncate(self.config.clipboard_max_items);
-        self.save()
+    fn compact(&self, items: &mut Vec<Clip>) -> Result<()> {
+        items.sort_by_key(|c| !c.pinned);
+        items.truncate(self.config.clipboard_max_items);
+        self.save(items)
     }
 
-    fn save(&self) -> Result<()> {
+    fn save(&self, items: &[Clip]) -> Result<()> {
         if let Some(parent) = self.cache.parent() { fs::create_dir_all(parent)?; }
-        fs::write(&self.cache, serde_json::to_vec(&self.items)?)?;
+        fs::write(&self.cache, serde_json::to_vec(items)?)?;
         Ok(())
+    }
+}
+
+/// Runs `wl-paste --watch` and emits one line per clipboard change. This mirrors Elephant's
+/// proven watcher path; the line is just a change signal, the real clipboard is read separately.
+fn spawn_watcher(store: Arc<ClipboardStore>) {
+    thread::spawn(move || {
+        let Ok(mut child) = Command::new("wl-paste")
+            .args(["--watch", "echo", "clipboard-changed"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else { return; };
+        let Some(mut stdout) = child.stdout.take() else { return; };
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => store.capture_current(),
+            }
+        }
+        let _ = child.wait();
+    });
+}
+
+pub struct ClipboardProvider { store: Arc<ClipboardStore> }
+
+impl ClipboardProvider {
+    pub fn new(config: Config) -> Result<Self> {
+        let cache = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("epochoxide/clipboard.json");
+        let items = fs::read_to_string(&cache).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let store = Arc::new(ClipboardStore { config, items: Mutex::new(items), cache });
+        spawn_watcher(Arc::clone(&store));
+        Ok(Self { store })
     }
 }
 
@@ -100,12 +127,13 @@ impl Provider for ClipboardProvider {
     fn pretty_name(&self) -> &'static str { "Clipboard" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
-        self.capture_current();
+        self.store.capture_current();
         let mut out = Vec::new();
-        for clip in &self.items {
+        let items = self.store.items.lock().unwrap();
+        for (index, clip) in items.iter().enumerate() {
             let searchable = format!("{} {}", clip.content, clip.ocr);
             if let Some((score, info)) = fuzzy::score(query, &searchable, exact, "text") {
-                let mut item = Item::new(self.name(), &clip.id, clip.content.lines().next().unwrap_or_default());
+                let mut item = Item::new(self.name(), &clip.id, clip.content.trim_start().lines().next().unwrap_or_default());
                 item.subtext = match clip.kind {
                     ClipKind::Text => clip.content.chars().take(160).collect(),
                     ClipKind::Image => clip.ocr.chars().take(160).collect::<String>().if_empty("Image"),
@@ -120,10 +148,10 @@ impl Provider for ClipboardProvider {
                     item.preview = clip.content.clone();
                     item.preview_type = "text".into();
                 }
-                if clip.kind == ClipKind::Image && self.config.clipboard_ocr { item.actions.push("ocr".into()); }
+                if clip.kind == ClipKind::Image && self.store.config.clipboard_ocr { item.actions.push("ocr".into()); }
                 if clip.pinned { item.state.push("pinned".into()); }
                 item.state.push(match clip.kind { ClipKind::Text => "text", ClipKind::Image => "image" }.into());
-                item.score = score + if clip.pinned { 50_000 } else { 0 };
+                item.score = clipboard_score(items.len(), index, clip.pinned, score);
                 item.fuzzyinfo = Some(info);
                 out.push(item);
             }
@@ -136,23 +164,42 @@ impl Provider for ClipboardProvider {
     fn activate(&mut self, identifier: &str, action: &str, _query: &str, _arguments: &str) -> Result<()> {
         match action {
             "copy" => {
-                if let Some(c) = self.items.iter().find(|i| i.id == identifier) { copy_clip(c)?; }
+                let items = self.store.items.lock().unwrap();
+                if let Some(c) = items.iter().find(|i| i.id == identifier) { copy_clip(c)?; }
                 Ok(())
             }
             "edit" => {
-                if let Some(index) = self.items.iter().position(|i| i.id == identifier) { self.edit_clip(index)?; }
+                let index = self.store.items.lock().unwrap().iter().position(|i| i.id == identifier);
+                if let Some(index) = index { self.edit_clip(index)?; }
                 Ok(())
             }
             "ocr" => {
-                if let Some(c) = self.items.iter_mut().find(|i| i.id == identifier) {
+                let mut items = self.store.items.lock().unwrap();
+                if let Some(c) = items.iter_mut().find(|i| i.id == identifier) {
                     if let Some(path) = &c.image_path { c.ocr = run_ocr(Path::new(path)).unwrap_or_default(); }
                 }
-                self.save()
+                self.store.save(&items)
             }
-            "remove" => { self.items.retain(|i| i.id != identifier); self.save() }
-            "remove_all" => { self.items.clear(); self.save() }
-            "pin" => { if let Some(c) = self.items.iter_mut().find(|i| i.id == identifier) { c.pinned = true; } self.compact() }
-            "unpin" => { if let Some(c) = self.items.iter_mut().find(|i| i.id == identifier) { c.pinned = false; } self.compact() }
+            "remove" => {
+                let mut items = self.store.items.lock().unwrap();
+                items.retain(|i| i.id != identifier);
+                self.store.save(&items)
+            }
+            "remove_all" => {
+                let mut items = self.store.items.lock().unwrap();
+                items.clear();
+                self.store.save(&items)
+            }
+            "pin" => {
+                let mut items = self.store.items.lock().unwrap();
+                if let Some(c) = items.iter_mut().find(|i| i.id == identifier) { c.pinned = true; }
+                self.store.compact(&mut items)
+            }
+            "unpin" => {
+                let mut items = self.store.items.lock().unwrap();
+                if let Some(c) = items.iter_mut().find(|i| i.id == identifier) { c.pinned = false; }
+                self.store.compact(&mut items)
+            }
             _ => anyhow::bail!("unsupported clipboard action: {action}"),
         }
     }
@@ -183,31 +230,40 @@ impl Provider for ClipboardProvider {
 
 impl ClipboardProvider {
     fn edit_clip(&mut self, index: usize) -> Result<()> {
-        match self.items[index].kind {
+        let kind = self.store.items.lock().unwrap()[index].kind.clone();
+        match kind {
             ClipKind::Text => {
-                let path = std::env::temp_dir().join(format!("epochoxide-{}.txt", self.items[index].id));
-                fs::write(&path, &self.items[index].content)?;
-                run_editor(&self.config.clipboard_text_editor, &path)?;
+                let (id, content) = {
+                    let items = self.store.items.lock().unwrap();
+                    (items[index].id.clone(), items[index].content.clone())
+                };
+                let path = std::env::temp_dir().join(format!("epochoxide-{id}.txt"));
+                fs::write(&path, &content)?;
+                run_editor(&self.store.config.clipboard_text_editor, &path)?;
                 let edited = fs::read_to_string(&path)?;
-                self.items[index].content = edited;
-                self.items[index].id = format!("text-{:x}", stable_hash(self.items[index].content.as_bytes()));
-                copy_text(&self.items[index].content)?;
-                self.save()
+                let mut items = self.store.items.lock().unwrap();
+                items[index].content = edited;
+                items[index].id = format!("text-{:x}", stable_hash(items[index].content.as_bytes()));
+                let content = items[index].content.clone();
+                self.store.save(&items)?;
+                drop(items);
+                copy_text(&content)
             }
             ClipKind::Image => {
-                let Some(path) = self.items[index].image_path.clone() else { return Ok(()); };
-                let editor = if self.config.clipboard_image_editor.is_empty() { "xdg-open" } else { &self.config.clipboard_image_editor };
+                let path = self.store.items.lock().unwrap()[index].image_path.clone();
+                let Some(path) = path else { return Ok(()); };
+                let editor = if self.store.config.clipboard_image_editor.is_empty() { "xdg-open" } else { &self.store.config.clipboard_image_editor };
                 run_editor(editor, Path::new(&path))
             }
         }
     }
 }
 
-fn current_clipboard_mime() -> Option<String> {
+fn current_clipboard_image_mime() -> Option<String> {
     let out = Command::new("wl-paste").arg("--list-types").output().ok()?;
     if !out.status.success() { return None; }
     let types = String::from_utf8_lossy(&out.stdout);
-    types.lines().find(|t| t.starts_with("image/")).or_else(|| types.lines().find(|t| t.starts_with("text/") || *t == "UTF8_STRING" || *t == "STRING")).map(str::to_string)
+    types.lines().find(|t| t.starts_with("image/")).map(str::to_string)
 }
 
 fn copy_clip(clip: &Clip) -> Result<()> {
@@ -265,9 +321,14 @@ impl IfEmpty for String {
     }
 }
 
+fn clipboard_score(total: usize, index: usize, pinned: bool, fuzzy_score: i32) -> i32 {
+    let recency = total.saturating_sub(index) as i32;
+    (if pinned { 50_000 } else { 0 }) + recency * 100 + fuzzy_score.min(99)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{image_extension, stable_hash};
+    use super::{clipboard_score, image_extension, stable_hash};
 
     #[test]
     fn image_mime_maps_to_extension() {
@@ -278,5 +339,15 @@ mod tests {
     #[test]
     fn hash_is_stable() {
         assert_eq!(stable_hash(b"abc"), stable_hash(b"abc"));
+    }
+
+    #[test]
+    fn clipboard_score_prefers_recency_over_fuzzy_score() {
+        assert!(clipboard_score(2, 0, false, 1) > clipboard_score(2, 1, false, 10_000));
+    }
+
+    #[test]
+    fn clipboard_score_keeps_pinned_above_unpinned() {
+        assert!(clipboard_score(2, 1, true, 1) > clipboard_score(2, 0, false, 10_000));
     }
 }

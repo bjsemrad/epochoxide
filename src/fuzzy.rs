@@ -23,6 +23,13 @@ pub fn score_lower(query: &str, candidate: &str, exact: bool, field: &str) -> Op
         return Some((score, FuzzyInfo { start, field: field.to_string(), positions }));
     }
 
+    if let Some(start) = candidate.find(query) {
+        let positions = (start..start + query.len()).collect::<Vec<_>>();
+        let word_bonus = if start == 0 || candidate.as_bytes().get(start.saturating_sub(1)).is_some_and(|b| !b.is_ascii_alphanumeric()) { 1_000 } else { 0 };
+        let score = 5_000 + query.len() as i32 * 200 + word_bonus - start as i32;
+        return Some((score, FuzzyInfo { start, field: field.to_string(), positions }));
+    }
+
     let mut positions = Vec::with_capacity(query.len());
     let mut needle = query.chars();
     let mut current = needle.next()?;
@@ -66,5 +73,12 @@ mod tests {
     fn exact_requires_substring() {
         assert!(score("fox", "Firefox", true, "text").is_some());
         assert!(score("fx", "Firefox", true, "text").is_none());
+    }
+
+    #[test]
+    fn substring_beats_loose_fuzzy_match() {
+        let (substring, _) = score("mission", "Mission Center", false, "text").unwrap();
+        let (loose, _) = score("mission", "mxxixxssxxioxxn", false, "text").unwrap();
+        assert!(substring > loose);
     }
 }
