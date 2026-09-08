@@ -91,11 +91,11 @@ impl Provider for WindowsProvider {
     fn activate(&mut self, identifier: &str, action: &str, _query: &str, _arguments: &str) -> Result<()> {
         let Some((backend, id)) = identifier.split_once(':') else { return Ok(()); };
         match (action, backend) {
-            ("focus", "hypr") => hypr_activate(&format!("dispatch focuswindow address:{id}")),
+            ("focus", "hypr") => hypr_window_dispatch("focuswindow", "hl.dsp.focus({ window = w })", id),
             ("focus", "sway") => run_shell(&format!("swaymsg '[con_id={id}] focus'")),
             ("focus", "niri") => run_shell(&format!("{} msg action focus-window --id {id}", niri_shell())),
             ("focus", "wmctrl") => run_shell(&format!("wmctrl -ia {id}")),
-            ("close", "hypr") => hypr_activate(&format!("dispatch closewindow address:{id}")),
+            ("close", "hypr") => hypr_window_dispatch("closewindow", "hl.dsp.window.close({ window = w })", id),
             ("close", "sway") => run_shell(&format!("swaymsg '[con_id={id}] kill'")),
             ("close", "niri") => run_shell(&format!("{} msg action close-window --id {id}", niri_shell())),
             ("close", "wmctrl") => run_shell(&format!("wmctrl -ic {id}")),
@@ -238,9 +238,28 @@ fn output(mut command: std::process::Command) -> Option<String> {
     if out.status.success() { Some(String::from_utf8_lossy(&out.stdout).trim().to_string()) } else { None }
 }
 
-fn hypr_activate(command: &str) -> Result<()> {
-    if hypr_ipc(command).is_some() { return Ok(()); }
-    run_shell(&format!("{} {command}", hypr_shell()))
+/// Focus/close a window by address, whichever config flavour Hyprland was started with.
+///
+/// A Hyprland started from a Lua config runs `dispatch` through Lua, so the classic
+/// `dispatch focuswindow address:0x…` arrives as `hl.dispatch(focuswindow address:0x…)` and dies
+/// on a syntax error — one that still comes back as a normal (non-empty) reply, so it has to be
+/// told apart from the plain `ok` a real dispatch answers with. The classic form goes first
+/// because it is the only one older Hyprlands understand; the Lua fallback looks the window
+/// object up by address and dispatches against it.
+fn hypr_window_dispatch(dispatcher: &str, lua_dispatch: &str, address: &str) -> Result<()> {
+    if hypr_send(&["dispatch", dispatcher, &format!("address:{address}")]) { return Ok(()); }
+    let lua = format!(
+        "for _, w in ipairs(hl.get_windows()) do if w.address == \"{address}\" then hl.dispatch({lua_dispatch}) return \"ok\" end end return \"no window\""
+    );
+    if hypr_send(&["repl", &lua]) { return Ok(()); }
+    anyhow::bail!("hyprland rejected {dispatcher} for {address}")
+}
+
+/// True only when Hyprland answered `ok`; every failure path (Lua syntax error, unknown window,
+/// unreachable compositor) answers with something else.
+fn hypr_send(args: &[&str]) -> bool {
+    let reply = hypr_ipc(&args.join(" ")).or_else(|| hypr_output(args));
+    reply.is_some_and(|reply| reply.trim() == "ok")
 }
 
 fn hypr_ipc(command: &str) -> Option<String> {
@@ -260,10 +279,6 @@ fn hypr_socket_path() -> Option<PathBuf> {
     let sig = hypr_signature()?;
     let socket = std::path::Path::new(&runtime_dir()).join("hypr").join(sig).join(".socket.sock");
     socket.exists().then_some(socket)
-}
-
-fn hypr_shell() -> String {
-    hypr_signature().map(|sig| format!("HYPRLAND_INSTANCE_SIGNATURE={} hyprctl", shell_quote(&sig))).unwrap_or_else(|| "hyprctl".into())
 }
 
 fn niri_shell() -> String {
