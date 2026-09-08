@@ -69,9 +69,10 @@ impl Provider for RunnerProvider {
     fn pretty_name(&self) -> &'static str { "Runner" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
+        let query_lower = query.to_lowercase();
         let mut out = Vec::new();
         for command in &self.commands {
-            if let Some((score, info)) = fuzzy::score(query, &command.search, exact, "text") {
+            if let Some((score, info)) = fuzzy::score_lower(&query_lower, &command.search, exact, "text") {
                 let mut item = Item::new(self.name(), &command.id, &command.name);
                 item.subtext = command.command.clone();
                 item.icon = command.icon.clone();

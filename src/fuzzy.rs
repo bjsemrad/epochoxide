@@ -5,23 +5,28 @@ pub fn mask(s: &str) -> u64 {
 }
 
 pub fn score(query: &str, candidate: &str, exact: bool, field: &str) -> Option<(i32, FuzzyInfo)> {
+    score_lower(&query.to_lowercase(), &candidate.to_lowercase(), exact, field)
+}
+
+/// Like `score`, but assumes `query`/`candidate` are already lowercase. Callers whose search
+/// fields are pre-lowercased at index time (files/apps/runner) should call this directly and
+/// lowercase `query` once per query rather than once per candidate via `score`.
+pub fn score_lower(query: &str, candidate: &str, exact: bool, field: &str) -> Option<(i32, FuzzyInfo)> {
     if query.is_empty() {
         return Some((1, FuzzyInfo { start: 0, field: field.to_string(), positions: Vec::new() }));
     }
 
-    let q = query.to_lowercase();
-    let c = candidate.to_lowercase();
     if exact {
-        let start = c.find(&q)?;
-        let positions = (start..start + q.len()).collect::<Vec<_>>();
-        let score = 10_000 - start as i32 + q.len() as i32 * 100;
+        let start = candidate.find(query)?;
+        let positions = (start..start + query.len()).collect::<Vec<_>>();
+        let score = 10_000 - start as i32 + query.len() as i32 * 100;
         return Some((score, FuzzyInfo { start, field: field.to_string(), positions }));
     }
 
-    let mut positions = Vec::with_capacity(q.len());
-    let mut needle = q.chars();
+    let mut positions = Vec::with_capacity(query.len());
+    let mut needle = query.chars();
     let mut current = needle.next()?;
-    for (idx, ch) in c.chars().enumerate() {
+    for (idx, ch) in candidate.chars().enumerate() {
         if ch == current {
             positions.push(idx);
             if let Some(next) = needle.next() {
@@ -31,7 +36,7 @@ pub fn score(query: &str, candidate: &str, exact: bool, field: &str) -> Option<(
                 let span = positions.last().copied().unwrap_or(start) - start + 1;
                 let compact_bonus = (100usize.saturating_sub(span) as i32).max(0);
                 let prefix_bonus = if start == 0 { 500 } else { 0 };
-                let score = 1_000 + q.len() as i32 * 100 + compact_bonus + prefix_bonus - start as i32;
+                let score = 1_000 + query.len() as i32 * 100 + compact_bonus + prefix_bonus - start as i32;
                 return Some((score, FuzzyInfo { start, field: field.to_string(), positions }));
             }
         }

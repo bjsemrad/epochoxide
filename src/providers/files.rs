@@ -144,11 +144,12 @@ impl Provider for FilesProvider {
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
         self.drain_events();
         if query.is_empty() { return Vec::new(); }
-        let query_mask = fuzzy::mask(&query.to_lowercase());
+        let query_lower = query.to_lowercase();
+        let query_mask = fuzzy::mask(&query_lower);
         let mut out = Vec::new();
         for f in self.files.values() {
             if f.mask & query_mask != query_mask { continue; }
-            if let Some((score, info)) = fuzzy::score(query, &f.search, exact, "text") {
+            if let Some((score, info)) = fuzzy::score_lower(&query_lower, &f.search, exact, "text") {
                 let mut item = Item::new(self.name(), &f.display, &f.display);
                 item.item_type = ItemType::File;
                 item.preview = f.display.clone();

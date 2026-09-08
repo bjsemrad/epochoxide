@@ -83,9 +83,10 @@ impl Provider for AppsProvider {
     fn pretty_name(&self) -> &'static str { "Desktop Applications" }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
+        let query_lower = query.to_lowercase();
         let mut items = Vec::new();
         for app in &self.apps {
-            if let Some((score, info)) = fuzzy::score(query, &app.search, exact, "text") {
+            if let Some((score, info)) = fuzzy::score_lower(&query_lower, &app.search, exact, "text") {
                 let mut item = Item::new(self.name(), &app.id, &app.name);
                 item.subtext = if app.generic_name.is_empty() { app.comment.clone() } else { app.generic_name.clone() };
                 item.icon = app.icon.clone();
