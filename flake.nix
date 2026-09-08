@@ -213,7 +213,7 @@
                 Restart = "on-failure";
                 RestartSec = 1;
               };
-              Install.WantedBy = [ "default.target" ];
+              Install.WantedBy = [ "graphical-session.target" ];
             };
           };
         };
@@ -265,7 +265,7 @@
               description = "EpochOxide desktop shell data provider";
               after = [ "graphical-session.target" ];
               partOf = [ "graphical-session.target" ];
-              wantedBy = [ "default.target" ];
+              wantedBy = [ "graphical-session.target" ];
               serviceConfig = {
                 Type = "simple";
                 ExecStart = "${package}/bin/epochoxide --config ${configFile} serve --socket ${cfg.socket}";

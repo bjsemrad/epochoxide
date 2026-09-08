@@ -22,7 +22,7 @@ pub fn install(config_arg: Option<&str>, config: &Config) -> Result<()> {
     args.push(quote_systemd_arg(&config.socket));
 
     let unit = format!(
-        "[Unit]\nDescription=EpochOxide desktop shell data provider\nDocumentation=file://{readme}\nAfter=graphical-session.target\nPartOf=graphical-session.target\n\n[Service]\nType=simple\nExecStart={exec}\nRestart=on-failure\nRestartSec=1\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=EpochOxide desktop shell data provider\nDocumentation=file://{readme}\nAfter=graphical-session.target\nPartOf=graphical-session.target\n\n[Service]\nType=simple\nExecStart={exec}\nRestart=on-failure\nRestartSec=1\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=graphical-session.target\n",
         readme = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("README.md").display(),
         exec = args.join(" "),
     );

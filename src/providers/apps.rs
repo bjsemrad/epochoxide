@@ -205,8 +205,10 @@ fn parse_desktop(path: &Path) -> Result<DesktopEntry> {
 
 fn clean_exec(input: &str) -> String {
     const CODES: [&str; 15] = ["%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i", "%c", "%k", "%v", "%m", "%%", "%" ];
+    const FLATPAK_FILE_FORWARDING: [&str; 4] = ["@@u", "@@U", "@@", "@@@"];
     let mut out = input.to_string();
     for code in CODES { out = out.replace(code, ""); }
+    for marker in FLATPAK_FILE_FORWARDING { out = out.replace(marker, ""); }
     out.trim().to_string()
 }
 
@@ -222,6 +224,14 @@ mod tests {
     #[test]
     fn removes_desktop_exec_field_codes() {
         assert_eq!(clean_exec("firefox %u"), "firefox");
+    }
+
+    #[test]
+    fn removes_flatpak_file_forwarding_markers() {
+        assert_eq!(
+            clean_exec("/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=brave --file-forwarding com.brave.Browser @@u %U @@"),
+            "/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=brave --file-forwarding com.brave.Browser"
+        );
     }
 
     #[test]
