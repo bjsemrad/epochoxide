@@ -291,6 +291,36 @@ fn handle_client(mut stream: UnixStream, startup: Arc<Startup>) -> Result<()> {
                 version,
             }) => {
                 let params = params.unwrap_or(Value::Null);
+                // A streaming method holds the connection for as long as the client wants it, so
+                // it takes over the socket instead of producing one response.
+                if crate::api::is_streaming(&method) {
+                    let initial = Response {
+                        ok: true,
+                        data: json!({"type": "subscribed", "method": method}),
+                        error: None::<String>,
+                    };
+                    writeln!(stream, "{}", serde_json::to_string(&initial)?)?;
+                    stream.flush()?;
+                    let result = crate::api::stream(&method, &params, |data| {
+                        let response = Response {
+                            ok: true,
+                            data,
+                            error: None::<String>,
+                        };
+                        writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+                        stream.flush()?;
+                        Ok(())
+                    });
+                    if let Err(err) = result {
+                        let response = Response {
+                            ok: false,
+                            data: err.to_value(),
+                            error: Some(err.message.clone()),
+                        };
+                        let _ = writeln!(stream, "{}", serde_json::to_string(&response)?);
+                    }
+                    return Ok(());
+                }
                 match crate::api::dispatch(&method, &params, version) {
                     Ok(data) => serde_json::to_value(Response {
                         ok: true,

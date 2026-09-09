@@ -49,6 +49,9 @@ fn parse(line: &str) -> Option<Window> {
         monitor: String::new(),
         focused: false,
         floating: false,
+        // `wmctrl -lx` carries no geometry, so ordering falls back to the listing order.
+        x: 0,
+        y: 0,
     })
 }
 

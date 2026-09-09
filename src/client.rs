@@ -139,3 +139,26 @@ pub fn request_envelope(socket: &str, payload: Value) -> Result<Option<Value>> {
         Err(err) => Err(err).context("reading daemon response"),
     }
 }
+
+/// Open a streaming API method and hand back each payload as it arrives.
+///
+/// The first response is the subscription acknowledgement and is dropped; everything after it is
+/// one payload per line, for as long as the caller keeps reading.
+pub fn api_stream(
+    socket: &str,
+    method: &str,
+    params: &Value,
+) -> Result<impl Iterator<Item = Result<Value>>> {
+    let mut client = StreamClient::connect(socket)?;
+    client.send(&serde_json::json!({
+        "type": "api",
+        "method": method,
+        "params": params,
+    }))?;
+    let _acknowledgement = client.next()?;
+    Ok(std::iter::from_fn(move || match client.next() {
+        Ok(Some(data)) => Some(Ok(data)),
+        Ok(None) => None,
+        Err(err) => Some(Err(err)),
+    }))
+}

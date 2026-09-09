@@ -1,9 +1,9 @@
 //! Low-level ways to reach a compositor: sockets, CLIs, and the environment hints that locate
 //! them. Nothing here knows what a window is; the backends build on it.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::{
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     time::Duration,
@@ -132,6 +132,31 @@ fn lua_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Hyprland's event socket. Every line is `EVENT>>payload`.
+///
+/// The payloads are never parsed: they say *that* something changed, which is all a re-read
+/// needs, and parsing them here would put Hyprland's event vocabulary back into the data path.
+pub fn hypr_watch(on_event: &mut dyn FnMut() -> anyhow::Result<()>) -> Result<()> {
+    let socket = hypr_event_socket_path()
+        .ok_or_else(|| anyhow::anyhow!("hyprland event socket not found"))?;
+    let stream = UnixStream::connect(socket).context("connecting to the hyprland event socket")?;
+    for line in BufReader::new(stream).lines() {
+        // A read error means Hyprland went away; ending the watch lets the caller reconnect.
+        let Ok(_line) = line else { break };
+        on_event()?;
+    }
+    Ok(())
+}
+
+fn hypr_event_socket_path() -> Option<PathBuf> {
+    let sig = hypr_signature()?;
+    let socket = std::path::Path::new(&runtime_dir())
+        .join("hypr")
+        .join(sig)
+        .join(".socket2.sock");
+    socket.exists().then_some(socket)
+}
+
 fn hypr_socket_path() -> Option<PathBuf> {
     let sig = hypr_signature()?;
     let socket = std::path::Path::new(&runtime_dir())
@@ -210,6 +235,21 @@ fn runtime_dir() -> String {
     std::env::var("XDG_RUNTIME_DIR")
         .or_else(|_| std::env::var("UID").map(|uid| format!("/run/user/{uid}")))
         .unwrap_or_else(|_| "/run/user/1000".into())
+}
+
+/// niri's event stream: connect, ask for it, then every line is one event.
+///
+/// As with Hyprland, the event bodies are ignored -- they only signal that a re-read is due.
+pub fn niri_watch(on_event: &mut dyn FnMut() -> anyhow::Result<()>) -> Result<()> {
+    let socket = niri_socket().ok_or_else(|| anyhow::anyhow!("niri socket not found"))?;
+    let mut stream = UnixStream::connect(socket).context("connecting to the niri socket")?;
+    writeln!(stream, "\"EventStream\"")?;
+    stream.flush()?;
+    for line in BufReader::new(stream).lines() {
+        let Ok(_line) = line else { break };
+        on_event()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

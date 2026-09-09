@@ -91,6 +91,13 @@ impl Compositor for Sway {
     }
 }
 
+fn rect(node: &Value, key: &str) -> i64 {
+    node.get("rect")
+        .and_then(|rect| rect.get(key))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+}
+
 fn json(args: &[&str]) -> Option<Value> {
     serde_json::from_str(&command_output("swaymsg", args)?).ok()
 }
@@ -128,6 +135,8 @@ fn collect(node: &Value, workspace: &str, out: &mut Vec<Window>) {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 floating: false,
+                x: rect(node, "x"),
+                y: rect(node, "y"),
             });
         }
     }

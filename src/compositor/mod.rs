@@ -29,6 +29,10 @@ pub struct Window {
     pub monitor: String,
     pub focused: bool,
     pub floating: bool,
+    /// Position on its workspace. Used to order windows the way they are laid out on screen; a
+    /// backend that does not report geometry leaves both at zero.
+    pub x: i64,
+    pub y: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,6 +86,72 @@ pub trait Compositor: Send + Sync {
     fn focus_workspace(&self, _handle: &str) -> Result<()> {
         anyhow::bail!("{} cannot switch workspaces", self.name())
     }
+
+    /// Block, calling `on_event` whenever compositor state may have changed.
+    ///
+    /// Backends with an event socket implement this so a change reaches the shell immediately.
+    /// The default polls, which is what a backend with no event source (wmctrl) is left with.
+    /// Implementations pass on whatever `on_event` returns: an error means the consumer has gone
+    /// away, and the watch should stop rather than spin.
+    fn watch(&self, on_event: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        loop {
+            std::thread::sleep(POLL_INTERVAL);
+            on_event()?;
+        }
+    }
+}
+
+/// How often a backend with no event source re-checks. Only wmctrl and sway use this.
+pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Everything the shell needs to render compositor state, in one payload.
+///
+/// State is pushed as a whole snapshot rather than as deltas: a compositor event says something
+/// changed but not reliably what, and the whole payload is a few hundred bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct State {
+    pub backend: String,
+    pub windows: Vec<Window>,
+    pub workspaces: Vec<Workspace>,
+    pub monitors: Vec<Monitor>,
+    pub active_window: Option<Window>,
+}
+
+/// Read the whole of the current state from one backend.
+pub fn state_of(backend: &dyn Compositor) -> State {
+    let mut windows = backend.windows().unwrap_or_default();
+    sort_windows(&mut windows);
+    let mut workspaces = backend.workspaces().unwrap_or_default();
+    workspaces.sort_by_key(|workspace| workspace_order(&workspace.name));
+    State {
+        backend: backend.name().to_string(),
+        active_window: windows.iter().find(|window| window.focused).cloned(),
+        windows,
+        workspaces,
+        monitors: backend.monitors().unwrap_or_default(),
+    }
+}
+
+/// Watch the running compositor, calling `emit` with a fresh snapshot whenever one differs from
+/// the last. Blocks until `emit` fails, which is how a disconnected client stops the watch.
+///
+/// Events are deliberately not forwarded: a raw `workspace>>3` line is exactly the sort of
+/// backend detail this module exists to keep out of the shell. An event only triggers a re-read.
+pub fn watch(mut emit: impl FnMut(&State) -> Result<()>) -> Result<()> {
+    let backend =
+        active().ok_or_else(|| anyhow::anyhow!("no supported compositor is responding"))?;
+    let mut last = state_of(backend.as_ref());
+    emit(&last)?;
+    backend.watch(&mut || {
+        let current = state_of(backend.as_ref());
+        // Compositors emit several events for one user action, and some (cursor moves, focus
+        // churn) change nothing the shell renders. Only differences are worth a wake-up.
+        if current != last {
+            last = current;
+            emit(&last)?;
+        }
+        Ok(())
+    })
 }
 
 /// Every backend, in the order they should be tried.
@@ -136,7 +206,31 @@ fn first<T>(query: impl Fn(&dyn Compositor) -> Option<T>) -> Option<T> {
 }
 
 pub fn windows() -> Vec<Window> {
-    first(|backend| backend.windows()).unwrap_or_default()
+    let mut windows = first(|backend| backend.windows()).unwrap_or_default();
+    sort_windows(&mut windows);
+    windows
+}
+
+/// Left to right, then top to bottom, which is the order they appear on screen and so the order
+/// the bar should draw them in. Compositors return windows in their own internal order -- most
+/// recently focused, or creation order -- which is not what a viewer sees.
+pub fn sort_windows(windows: &mut [Window]) {
+    windows.sort_by(|a, b| {
+        workspace_order(&a.workspace)
+            .cmp(&workspace_order(&b.workspace))
+            .then(a.x.cmp(&b.x))
+            .then(a.y.cmp(&b.y))
+            .then(a.id.cmp(&b.id))
+    });
+}
+
+/// Order a workspace by its displayed name: numerically when it is a number, which is the usual
+/// case on both Hyprland and niri, and alphabetically after those when it is not.
+fn workspace_order(name: &str) -> (u8, i64, String) {
+    match name.parse::<i64>() {
+        Ok(number) => (0, number, String::new()),
+        Err(_) => (1, 0, name.to_lowercase()),
+    }
 }
 
 pub fn active_window() -> Option<Window> {
@@ -144,7 +238,9 @@ pub fn active_window() -> Option<Window> {
 }
 
 pub fn workspaces() -> Vec<Workspace> {
-    first(|backend| backend.workspaces()).unwrap_or_default()
+    let mut workspaces = first(|backend| backend.workspaces()).unwrap_or_default();
+    workspaces.sort_by_key(|workspace| workspace_order(&workspace.name));
+    workspaces
 }
 
 pub fn monitors() -> Vec<Monitor> {
@@ -255,6 +351,64 @@ mod tests {
             );
         }
         assert_eq!(names.len(), 4, "a backend is listed twice: {names:?}");
+    }
+
+    fn window(workspace: &str, x: i64, y: i64, id: &str) -> Window {
+        Window {
+            id: id.to_string(),
+            app_id: String::new(),
+            title: String::new(),
+            workspace: workspace.to_string(),
+            monitor: String::new(),
+            focused: false,
+            floating: false,
+            x,
+            y,
+        }
+    }
+
+    #[test]
+    fn windows_are_ordered_left_to_right_then_top_to_bottom() {
+        // Compositors hand back windows in focus or creation order; the bar wants the order they
+        // sit on screen.
+        let mut windows = vec![
+            window("1", 900, 0, "c"),
+            window("1", 100, 500, "b"),
+            window("1", 100, 0, "a"),
+        ];
+        sort_windows(&mut windows);
+        let ids: Vec<&str> = windows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn windows_group_by_workspace_in_numeric_order() {
+        let mut windows = vec![
+            window("10", 0, 0, "ten"),
+            window("2", 0, 0, "two"),
+            window("1", 0, 0, "one"),
+        ];
+        sort_windows(&mut windows);
+        let ids: Vec<&str> = windows.iter().map(|w| w.id.as_str()).collect();
+        // "10" must not sort between "1" and "2", which a plain string sort would do.
+        assert_eq!(ids, ["one", "two", "ten"]);
+    }
+
+    #[test]
+    fn named_workspaces_sort_after_numbered_ones() {
+        assert!(workspace_order("2") < workspace_order("10"));
+        assert!(workspace_order("10") < workspace_order("web"));
+        assert!(workspace_order("web") < workspace_order("zed"));
+    }
+
+    #[test]
+    fn ordering_is_stable_for_windows_in_the_same_place() {
+        // Two windows can report the same position (a stack, or a backend with no geometry at
+        // all), and the strip should not reshuffle between snapshots.
+        let mut windows = vec![window("1", 0, 0, "b"), window("1", 0, 0, "a")];
+        sort_windows(&mut windows);
+        let ids: Vec<&str> = windows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
     }
 
     #[test]

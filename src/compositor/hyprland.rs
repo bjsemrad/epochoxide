@@ -1,6 +1,8 @@
 //! Hyprland, over its IPC socket with a `hyprctl` fallback.
 
-use super::ipc::{hypr_ipc, hypr_output, hypr_window_dispatch, hypr_workspace_dispatch};
+use super::ipc::{
+    hypr_ipc, hypr_output, hypr_watch, hypr_window_dispatch, hypr_workspace_dispatch,
+};
 use super::{Compositor, Monitor, Window, Workspace};
 use anyhow::Result;
 use serde_json::Value;
@@ -114,6 +116,10 @@ impl Compositor for Hyprland {
     fn focus_workspace(&self, handle: &str) -> Result<()> {
         hypr_workspace_dispatch(handle)
     }
+
+    fn watch(&self, on_event: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        hypr_watch(on_event)
+    }
 }
 
 /// Prefer the IPC socket, fall back to the CLI.
@@ -147,7 +153,19 @@ fn window(client: &Value, active: Option<&str>, monitor_names: &[String]) -> Win
             .get("floating")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        x: at(client, 0),
+        y: at(client, 1),
     }
+}
+
+/// Hyprland reports a window's position as `at: [x, y]`.
+fn at(client: &Value, index: usize) -> i64 {
+    client
+        .get("at")
+        .and_then(Value::as_array)
+        .and_then(|pair| pair.get(index))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

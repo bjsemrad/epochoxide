@@ -175,6 +175,22 @@ fn main() -> Result<()> {
                 .map_err(|err| anyhow::anyhow!("--params must be JSON: {err}"))?;
             // Prefer the warm daemon; fall back to answering in-process so the CLI still works
             // with no daemon running.
+            // A streaming method never returns; print each payload as it arrives. It needs a
+            // daemon -- there is nothing to hold the stream open in a one-shot CLI process.
+            if api::is_streaming(&method) {
+                match client::api_stream(&config.socket, &method, &params) {
+                    Ok(payloads) => {
+                        for payload in payloads {
+                            println!("{}", serde_json::to_string(&payload?)?);
+                        }
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        anyhow::bail!("{method} needs a running daemon: {err}");
+                    }
+                }
+            }
+
             let answered = client::request_envelope(
                 &config.socket,
                 serde_json::json!({

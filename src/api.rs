@@ -122,6 +122,8 @@ struct Method {
     name: &'static str,
     summary: &'static str,
     params: &'static [(&'static str, &'static str)],
+    /// A streaming method answers with many payloads over a held-open connection instead of one.
+    streaming: bool,
 }
 
 struct Group {
@@ -139,6 +141,16 @@ const fn method(
         name,
         summary,
         params,
+        streaming: false,
+    }
+}
+
+const fn streaming(name: &'static str, summary: &'static str) -> Method {
+    Method {
+        name,
+        summary,
+        params: &[],
+        streaming: true,
     }
 }
 
@@ -161,6 +173,10 @@ const COMPOSITOR: &[Method] = &[
         "focusWorkspace",
         "Switch to a workspace by id or name",
         &[("id", "string, from compositor.workspaces, or a bare name")],
+    ),
+    streaming(
+        "subscribe",
+        "Stream normalized state whenever the compositor changes",
     ),
 ];
 
@@ -258,6 +274,7 @@ pub fn describe() -> Value {
                 "methods": group.methods.iter().map(|method| json!({
                     "name": format!("{}.{}", group.name, method.name),
                     "summary": method.summary,
+                    "streaming": method.streaming,
                     "params": method.params.iter().map(|(name, kind)| json!({
                         "name": name,
                         "type": kind,
@@ -272,6 +289,36 @@ pub fn describe() -> Value {
         "minor": VERSION_MINOR,
         "groups": groups,
     })
+}
+
+/// Whether `method` streams. The server holds the connection open for these instead of writing
+/// one response and moving on.
+pub fn is_streaming(method: &str) -> bool {
+    let Some((group_name, call)) = method.split_once('.') else {
+        return false;
+    };
+    group(group_name)
+        .is_some_and(|found| found.methods.iter().any(|m| m.name == call && m.streaming))
+}
+
+/// Run a streaming method, handing each payload to `emit`. Returns when `emit` fails, which is
+/// how a disconnected client ends the stream.
+pub fn stream(
+    method: &str,
+    _params: &Value,
+    emit: impl FnMut(Value) -> anyhow::Result<()>,
+) -> Result<(), ApiError> {
+    match method {
+        "compositor.subscribe" => {
+            let mut emit = emit;
+            compositor::watch(|state| emit(serde_json::to_value(state).unwrap_or(Value::Null)))
+                .map_err(backend_error)
+        }
+        _ => Err(ApiError::new(
+            ErrorCode::UnknownMethod,
+            format!("\"{method}\" is not a streaming method"),
+        )),
+    }
 }
 
 fn param_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, ApiError> {
@@ -387,6 +434,10 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
             compositor::focus_workspace(param_str(params, "id")?).map_err(backend_error)?;
             Ok(json!({ "focused": true }))
         }
+        ("compositor", "subscribe") => Err(ApiError::new(
+            ErrorCode::InvalidParams,
+            "compositor.subscribe is a streaming method; it cannot be called as a single request",
+        )),
         ("tailscale", "status") => value(tailscale::status().map_err(backend_error)?),
         ("tailscale", "machines") => value(tailscale::machines().map_err(backend_error)?),
         ("tailscale", "send") => {

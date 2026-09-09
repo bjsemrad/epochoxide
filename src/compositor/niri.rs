@@ -1,6 +1,6 @@
 //! niri, over `niri msg --json`.
 
-use super::ipc::{niri_output, niri_shell, run};
+use super::ipc::{niri_output, niri_shell, niri_watch, run};
 use super::{Compositor, Monitor, Window, Workspace};
 use anyhow::Result;
 use serde_json::Value;
@@ -45,6 +45,8 @@ impl Compositor for Niri {
                             .get("is_floating")
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
+                        x: layout_pos(window, 0),
+                        y: layout_pos(window, 1),
                     }
                 })
                 .collect(),
@@ -134,6 +136,22 @@ impl Compositor for Niri {
             niri_shell()
         ))
     }
+
+    fn watch(&self, on_event: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        niri_watch(on_event)
+    }
+}
+
+/// niri lays windows out in scrolling columns, so a window's position in that layout is its
+/// order on screen -- the equivalent of an x/y for ordering purposes.
+fn layout_pos(window: &Value, index: usize) -> i64 {
+    window
+        .get("layout")
+        .and_then(|layout| layout.get("pos_in_scrolling_layout"))
+        .and_then(Value::as_array)
+        .and_then(|pair| pair.get(index))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
 }
 
 fn json(args: &[&str]) -> Option<Value> {

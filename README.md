@@ -525,13 +525,35 @@ Windows, workspaces, and monitors come back in one shape whatever the compositor
   "workspace": "4",
   "monitor": "eDP-1",
   "focused": true,
-  "floating": false
+  "floating": false,
+  "x": 6,
+  "y": 46
 }
 ```
+
+Both lists come back ordered so a caller can render them directly. Workspaces sort by displayed
+name, numerically where it is a number (`2` before `10`, not after) and alphabetically after those
+where it is not. Windows sort by workspace, then left to right and top to bottom -- the order they
+appear on screen, rather than the focus or creation order compositors return internally.
 
 `id` is backend-qualified and round-trips: pass it straight back to `focusWindow`. Hyprland
 reports a window's monitor as an index and niri reports workspaces by id — both are resolved to
 names here so the shell never has to.
+
+### Live updates
+
+```bash
+epochoxide api compositor.subscribe
+```
+
+Streams a full state snapshot: once on connect, then again whenever anything changes. The daemon
+watches Hyprland's `.socket2.sock` or niri's event stream and re-reads normalized state; backends
+with no event source fall back to polling. Compositor events are never forwarded -- a raw
+`workspace>>3` line is exactly the detail this layer exists to absorb, so an event only triggers a
+re-read. Snapshots that match the previous one are not sent, so the several events a compositor
+emits for one action arrive as a single update.
+
+Being a streaming method, it holds the connection open and needs a running daemon.
 
 Backends live one per file under `src/compositor/`, each an implementation of the `Compositor`
 trait. Hyprland, niri, and sway are supported, with wmctrl as an X11 fallback that can only list
