@@ -18,7 +18,7 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{capture, compositor, localsend, nix, tailscale};
+use crate::{capture, compositor, localsend, nix, power, tailscale};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -375,6 +375,12 @@ const NIX: &[Method] = &[
     ),
 ];
 
+const SYSTEM: &[Method] = &[method(
+    "power",
+    "CPU power state: profile, governor, energy preference, turbo, and what is managing them",
+    &[],
+)];
+
 const GROUPS: &[Group] = &[
     Group {
         name: "compositor",
@@ -411,7 +417,7 @@ const GROUPS: &[Group] = &[
     Group {
         name: "system",
         summary: "Power profiles and system state",
-        methods: &[],
+        methods: SYSTEM,
     },
 ];
 
@@ -440,6 +446,10 @@ fn availability(group: &str) -> Availability {
             }
         }
         "nix" => match nix::available() {
+            Ok(()) => Availability::Available,
+            Err(reason) => Availability::Unavailable(reason),
+        },
+        "system" => match power::available() {
             Ok(()) => Availability::Available,
             Err(reason) => Availability::Unavailable(reason),
         },
@@ -779,6 +789,7 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
             value(capture::stop_recording(param_bool(params, "notify")).map_err(backend_error)?)
         }
         ("capture", "recording") => value(capture::recording().map_err(backend_error)?),
+        ("system", "power") => value(power::status()),
         ("nix", "status") => value(nix::status()),
         ("nix", "check") => value(nix::check().map_err(backend_error)?),
         ("nix", "update") => {

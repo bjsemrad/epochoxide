@@ -23,6 +23,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - OCR capture: read the text out of part of the screen and put it on the clipboard.
 - Screen recording of a region, a window, or a monitor, with the daemon owning the recorder.
 - Nix flake update awareness: what could move, checked without writing to your flake.
+- CPU power state -- profile, governor, energy preference, turbo -- read from sysfs.
 - Versioned Epoch API for normalized compositor state and Tailscale, independent of the launcher.
 
 ## Why
@@ -512,7 +513,7 @@ contract version: 1.0
   localsend    available    9 methods
   dev          planned      0 methods   not implemented in this build
   nix          available    5 methods
-  system       planned      0 methods   not implemented in this build
+  system       available    1 method
 ```
 
 Groups marked `planned` are part of the contract but not implemented; they answer with
@@ -795,6 +796,42 @@ A rebuild is usually an alias or a script that already knows its target, so the 
 per host rather than derived from one template. Hosts read out of the flake's `nixosConfigurations`
 that config did not name fall back to `nix_rebuild_command` with `%HOST%` substituted, and are
 offered no action at all when that is empty. Nothing here has a default that changes a system.
+
+### System
+
+```bash
+epochoxide api system.power
+```
+
+```json
+{
+  "available": true,
+  "profile": "performance",
+  "governor": "performance",
+  "energy_preference": "performance",
+  "turbo": false,
+  "driver": "intel_pstate",
+  "manager": "auto-cpufreq",
+  "platform_profile": null,
+  "can_switch": false
+}
+```
+
+Everything comes from sysfs, so no daemon has to be installed and nothing needs root. `profile`
+reduces the governor and the energy preference to one word: `performance` is a CPU that will not
+clock down, while `powersave` is the governor every laptop idles at and says nothing on its own --
+there, the energy preference is what separates `balanced` from `power-saver`. The raw knobs come
+along because "balanced" explains nothing to someone who opened the panel because the fans are
+loud.
+
+`manager` names the daemon deciding it -- `auto-cpufreq`, `power-profiles-daemon`, `tuned`, or
+nothing. It is reported rather than depended on: the numbers are true whether or not anything is
+managing them.
+
+`can_switch` is false, and this build never changes a governor. Switching is a different problem:
+whatever daemon is managing the CPU puts its own decision back within seconds unless it is asked
+through its own override, so a switch that writes sysfs directly would appear to work and then
+quietly undo itself.
 
 ### LocalSend
 

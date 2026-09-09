@@ -9,6 +9,7 @@ mod icons;
 mod localsend;
 mod nix;
 mod notify;
+mod power;
 mod providers;
 mod server;
 mod service;

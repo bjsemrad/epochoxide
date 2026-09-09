@@ -905,5 +905,4 @@ mod tests {
             "nixpkgs"
         );
     }
-
 }
