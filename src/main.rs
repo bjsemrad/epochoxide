@@ -108,8 +108,9 @@ fn main() -> Result<()> {
             // Accepting transfers means binding a port and answering discovery, so a failure here
             // is reported and stepped over rather than stopping the daemon: everything else still
             // works without it.
+            localsend::configure(&config);
             if config.localsend_receive {
-                if let Err(err) = localsend::start_receiver(&config) {
+                if let Err(err) = localsend::start_receiver() {
                     eprintln!("localsend: not accepting transfers: {err:#}");
                 }
             }

@@ -611,6 +611,14 @@ The discovery socket sets `SO_REUSEADDR`/`SO_REUSEPORT`, because multicast has t
 the group's own port and the LocalSend desktop app is usually already bound to it -- which is
 exactly when discovery needs to work.
 
+Sharing that port has a consequence worth knowing: multicast is delivered to every socket joined to
+the group, but a **unicast** reply goes to only one of them. With the receiver running there are two
+sockets on that port, so a peer answering our announcement directly could be handed to the receiver
+and never reach the scan. The receiver therefore records every device it hears, and `devices`
+merges that in -- along with peers that announce over HTTP `register` rather than multicast, which a
+scan never sees at all. Without this, other devices could see this machine while it saw none of
+them.
+
 **Trust.** LocalSend uses self-signed certificates and no CA: a device announces the SHA-256
 fingerprint of its certificate, and identity is that fingerprint. Sending therefore pins it -- a
 TLS connection is accepted only when the certificate presented hashes to the value the device
@@ -628,13 +636,28 @@ there says so rather than reporting a bare network error.
 epochoxide api localsend.status     # receiving?, alias, port, fingerprint, download directory
 epochoxide api localsend.pending    # transfers waiting on a decision
 epochoxide api localsend.accept  --params '{"session":"..."}'
+epochoxide api localsend.accept  --params '{"session":"...","directory":"~/Pictures"}'
 epochoxide api localsend.decline --params '{"session":"..."}'
 epochoxide api localsend.received   # files accepted since the daemon started
+epochoxide api localsend.stopReceiving   # release the port
+epochoxide api localsend.startReceiving  # take it back
 ```
 
+**Sharing the port with the LocalSend app.** Only one process can hold 53317, so running the
+desktop app and this receiver at once means one of them loses -- and the loser still announces
+itself, leaving other devices able to see a machine they cannot reach. Rather than negotiating for
+the port, receiving can simply be switched off: `stopReceiving` drops the listener and frees 53317
+for the app, `startReceiving` takes it back. The shell exposes this as a toggle in the LocalSend
+panel. A port chosen by the OS was the alternative, but it changes on every restart, which no
+firewall rule can follow.
+
 The daemon runs an HTTPS server and answers discovery, so other devices can send to this machine
-with no LocalSend app installed. It is controlled by `localsend_receive`, and files land in
-`localsend_download_dir`.
+without the LocalSend app running here (the *sending* device still uses LocalSend, or anything else
+speaking the v2 protocol). It is controlled by `localsend_receive`.
+
+Files land in `localsend_download_dir` by default. `accept` takes an optional `directory` to send
+one transfer somewhere else, so a UI can ask where it should go. A directory that does not exist is
+refused rather than created, so a typo cannot quietly drop files somewhere nobody looks.
 
 **Consent.** `prepare-upload` is held open until someone accepts through the shell, or until the
 request expires after two minutes and is refused. Nothing reaches the disk before that: the file

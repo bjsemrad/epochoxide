@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The multicast group and port every LocalSend device listens on.
@@ -74,12 +74,12 @@ pub struct Sent {
 fn own_identity() -> Value {
     let receiving = receiver();
     json!({
-        "alias": receiving.map(|r| r.alias()).unwrap_or_else(alias),
+        "alias": receiving.as_ref().map(|r| r.alias()).unwrap_or_else(alias),
         "version": PROTOCOL_VERSION,
         "deviceModel": "Linux",
         "deviceType": "desktop",
         "fingerprint": own_fingerprint(),
-        "port": receiving.map(|r| r.port()).unwrap_or(PORT),
+        "port": receiving.as_ref().map(|r| r.port()).unwrap_or(PORT),
         // Only claim HTTPS when there is actually a server holding that certificate.
         "protocol": if receiving.is_some() { "https" } else { "http" },
         "download": false,
@@ -131,27 +131,59 @@ pub(crate) fn multicast_socket() -> Result<UdpSocket> {
     Ok(socket.into())
 }
 
-/// The running receiver, once started. Absent means this daemon is not accepting transfers.
-static RECEIVER: OnceLock<Arc<server::Receiver>> = OnceLock::new();
+/// The running receiver. `None` means this daemon is not accepting transfers, which is a state
+/// the user can switch into: the LocalSend app cannot bind the port while we hold it, so being
+/// able to let go is what makes running the app instead possible.
+static RECEIVER: Mutex<Option<Arc<server::Receiver>>> = Mutex::new(None);
 
-pub fn receiver() -> Option<&'static Arc<server::Receiver>> {
-    RECEIVER.get()
+/// How to start, remembered so receiving can be switched back on without passing settings again.
+static SETTINGS: OnceLock<(String, PathBuf)> = OnceLock::new();
+
+pub fn receiver() -> Option<Arc<server::Receiver>> {
+    RECEIVER.lock().ok()?.clone()
 }
 
-/// Start accepting transfers. Called once as the daemon comes up; a second call is a no-op.
-pub fn start_receiver(config: &crate::config::Config) -> Result<()> {
-    if RECEIVER.get().is_some() {
-        return Ok(());
-    }
+/// Remember how to start, without starting.
+pub fn configure(config: &crate::config::Config) {
     let name = if config.localsend_alias.is_empty() {
         alias()
     } else {
         config.localsend_alias.clone()
     };
     let directory = PathBuf::from(shellexpand::tilde(&config.localsend_download_dir).to_string());
-    let receiver = server::start(name, directory, PORT)?;
-    let _ = RECEIVER.set(receiver);
+    let _ = SETTINGS.set((name, directory));
+}
+
+/// Start accepting transfers. A second call while already running is a no-op.
+pub fn start_receiver() -> Result<()> {
+    let mut slot = RECEIVER
+        .lock()
+        .map_err(|_| anyhow!("the receiver lock is poisoned"))?;
+    if slot.is_some() {
+        return Ok(());
+    }
+    let (name, directory) = SETTINGS.get().cloned().unwrap_or_else(|| {
+        (
+            alias(),
+            PathBuf::from(shellexpand::tilde("~/Downloads").to_string()),
+        )
+    });
+    *slot = Some(server::start(name, directory, PORT)?);
     Ok(())
+}
+
+/// Stop accepting and release the port. Returns whether anything was running.
+pub fn stop_receiver() -> Result<bool> {
+    let mut slot = RECEIVER
+        .lock()
+        .map_err(|_| anyhow!("the receiver lock is poisoned"))?;
+    match slot.take() {
+        Some(receiver) => {
+            receiver.stop();
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 /// Whether discovery can run at all here.
@@ -200,6 +232,19 @@ pub fn devices() -> Result<Vec<Device>> {
         }
         found.push(device);
     }
+    // The receiver hears devices this one-shot scan can miss: with it running, two sockets are
+    // bound to the discovery port and the kernel gives a unicast reply to only one of them, and
+    // some devices announce themselves over HTTP rather than multicast. Merge what it has heard.
+    if let Some(receiver) = receiver() {
+        for device in receiver.seen() {
+            if !found
+                .iter()
+                .any(|seen| seen.fingerprint == device.fingerprint)
+            {
+                found.push(device);
+            }
+        }
+    }
     found.sort_by_key(|device| device.alias.to_lowercase());
     Ok(found)
 }
@@ -207,6 +252,16 @@ pub fn devices() -> Result<Vec<Device>> {
 /// Turn one announcement datagram into a device, using the sender's address as its IP.
 fn parse_announcement(payload: &[u8], from: SocketAddr) -> Option<Device> {
     let value: Value = serde_json::from_slice(payload).ok()?;
+    device_from_announcement(&value, from.ip(), PORT)
+}
+
+/// Build a device from an announcement body. The address comes from the connection rather than
+/// the payload, so a device cannot claim to be somewhere it is not.
+pub(crate) fn device_from_announcement(
+    value: &Value,
+    address: std::net::IpAddr,
+    default_port: u16,
+) -> Option<Device> {
     let fingerprint = value.get("fingerprint")?.as_str()?.to_string();
     if fingerprint.is_empty() {
         return None;
@@ -222,7 +277,7 @@ fn parse_announcement(payload: &[u8], from: SocketAddr) -> Option<Device> {
         alias: {
             let alias = string("alias");
             if alias.is_empty() {
-                from.ip().to_string()
+                address.to_string()
             } else {
                 alias
             }
@@ -230,12 +285,12 @@ fn parse_announcement(payload: &[u8], from: SocketAddr) -> Option<Device> {
         fingerprint,
         device_model: string("deviceModel"),
         device_type: string("deviceType"),
-        ip: from.ip().to_string(),
+        ip: address.to_string(),
         port: value
             .get("port")
             .and_then(Value::as_u64)
             .and_then(|port| u16::try_from(port).ok())
-            .unwrap_or(PORT),
+            .unwrap_or(default_port),
         protocol: {
             let protocol = string("protocol");
             if protocol.is_empty() {

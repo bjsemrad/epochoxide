@@ -220,7 +220,13 @@ const LOCALSEND: &[Method] = &[
     method(
         "accept",
         "Accept a waiting transfer",
-        &[("session", "string, from localsend.pending")],
+        &[
+            ("session", "string, from localsend.pending"),
+            (
+                "directory",
+                "optional string; where to save this transfer, defaulting to localsend_download_dir",
+            ),
+        ],
     ),
     method(
         "decline",
@@ -228,6 +234,16 @@ const LOCALSEND: &[Method] = &[
         &[("session", "string, from localsend.pending")],
     ),
     method("received", "Files accepted since the daemon started", &[]),
+    method(
+        "startReceiving",
+        "Start accepting transfers, binding the LocalSend port",
+        &[],
+    ),
+    method(
+        "stopReceiving",
+        "Stop accepting and release the port, so the LocalSend app can use it",
+        &[],
+    ),
     method(
         "send",
         "Send files to a device",
@@ -373,13 +389,34 @@ pub fn stream(
 }
 
 /// The running receiver, or a typed error explaining that transfers are not being accepted.
-fn receiving() -> Result<&'static std::sync::Arc<localsend::server::Receiver>, ApiError> {
+fn receiving() -> Result<std::sync::Arc<localsend::server::Receiver>, ApiError> {
     localsend::receiver().ok_or_else(|| {
         ApiError::new(
             ErrorCode::Unavailable,
             "this machine is not accepting LocalSend transfers (localsend_receive is off, or the receiver failed to start)",
         )
     })
+}
+
+/// An optional directory parameter, `~` expanded and required to exist.
+///
+/// A path that is not there is refused rather than created: a typo would otherwise silently make
+/// a directory and drop files somewhere nobody looks.
+fn optional_directory(params: &Value, key: &str) -> Result<Option<std::path::PathBuf>, ApiError> {
+    let Some(raw) = params.get(key).and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let expanded = std::path::PathBuf::from(shellexpand::tilde(raw).to_string());
+    if !expanded.is_dir() {
+        return Err(ApiError::new(
+            ErrorCode::InvalidParams,
+            format!("{} is not a directory", expanded.display()),
+        ));
+    }
+    Ok(Some(expanded))
 }
 
 fn param_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, ApiError> {
@@ -526,13 +563,27 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
             }),
             None => json!({ "receiving": false }),
         }),
+        ("localsend", "startReceiving") => {
+            localsend::start_receiver().map_err(backend_error)?;
+            let port = localsend::receiver().map(|r| r.port());
+            Ok(json!({ "receiving": true, "port": port }))
+        }
+        ("localsend", "stopReceiving") => {
+            let was_running = localsend::stop_receiver().map_err(backend_error)?;
+            Ok(json!({ "receiving": false, "stopped": was_running }))
+        }
         ("localsend", "pending") => value(receiving()?.pending()),
         ("localsend", "received") => value(receiving()?.received()),
         ("localsend", "accept") => {
+            let session = param_str(params, "session")?;
+            let directory = optional_directory(params, "directory")?;
+            let saving_to = directory
+                .clone()
+                .unwrap_or_else(|| receiving().map(|r| r.download_dir()).unwrap_or_default());
             receiving()?
-                .accept(param_str(params, "session")?)
+                .accept(session, directory)
                 .map_err(backend_error)?;
-            Ok(json!({ "accepted": true }))
+            Ok(json!({ "accepted": true, "directory": saving_to.display().to_string() }))
         }
         ("localsend", "decline") => {
             receiving()?

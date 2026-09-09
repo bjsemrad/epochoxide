@@ -14,11 +14,14 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long a sender is left waiting for someone to accept before the request is dropped.
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often a stopped receiver notices it should shut down.
+const ACCEPT_POLL: Duration = Duration::from_millis(150);
 /// Refuse absurd uploads outright rather than filling a disk.
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
@@ -54,6 +57,9 @@ struct Session {
     decision: Decision,
     /// fileId -> upload token handed back on acceptance.
     tokens: HashMap<String, String>,
+    /// Where this transfer was accepted into, when the caller chose somewhere other than the
+    /// configured download directory.
+    directory: Option<PathBuf>,
 }
 
 struct Inner {
@@ -64,6 +70,13 @@ struct Inner {
     fingerprint: String,
     /// Files written since the daemon started, newest first.
     received: Vec<IncomingFile>,
+    /// Devices this machine has heard from, by fingerprint.
+    ///
+    /// The receiver is the only thing listening continuously, so it is the only place that
+    /// reliably hears every peer. A one-shot scan can miss answers: with the receiver running
+    /// there are two sockets bound to the discovery port, and the kernel hands a *unicast* reply
+    /// to just one of them. Recording here means it does not matter which one got it.
+    seen: HashMap<String, super::Device>,
 }
 
 /// Shared receiver state. The condvar is how an accepted or declined request wakes the HTTP
@@ -71,6 +84,9 @@ struct Inner {
 pub struct Receiver {
     inner: Mutex<Inner>,
     decided: Condvar,
+    /// Set to stop accepting. The worker threads check it and return, which drops the listener
+    /// and releases the port -- the whole point of being able to stop.
+    stopping: AtomicBool,
 }
 
 impl Receiver {
@@ -105,7 +121,25 @@ impl Receiver {
         self.inner.lock().unwrap().received.clone()
     }
 
-    fn decide(&self, session: &str, decision: Decision) -> Result<()> {
+    /// Remember a device we heard from, whether it announced over multicast or registered
+    /// over HTTP.
+    pub fn remember(&self, device: super::Device) {
+        if device.fingerprint.is_empty() || device.fingerprint == self.fingerprint() {
+            return;
+        }
+        self.inner
+            .lock()
+            .unwrap()
+            .seen
+            .insert(device.fingerprint.clone(), device);
+    }
+
+    /// Every device heard from since the daemon started.
+    pub fn seen(&self) -> Vec<super::Device> {
+        self.inner.lock().unwrap().seen.values().cloned().collect()
+    }
+
+    fn decide(&self, session: &str, decision: Decision, directory: Option<PathBuf>) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         let entry = inner
             .sessions
@@ -115,20 +149,35 @@ impl Receiver {
             return Err(anyhow!("that transfer has already been answered"));
         }
         entry.decision = decision;
+        entry.directory = directory;
         drop(inner);
         self.decided.notify_all();
         Ok(())
     }
 
-    pub fn accept(&self, session: &str) -> Result<()> {
-        self.decide(session, Decision::Accepted)
+    /// Accept a transfer. `directory` overrides the configured download directory for this
+    /// transfer only, so a caller can ask where the files should land.
+    pub fn accept(&self, session: &str, directory: Option<PathBuf>) -> Result<()> {
+        self.decide(session, Decision::Accepted, directory)
     }
 
     pub fn decline(&self, session: &str) -> Result<()> {
-        self.decide(session, Decision::Declined)
+        self.decide(session, Decision::Declined, None)
     }
 
     /// This device, in the shape LocalSend announcements and `/info` use.
+    /// Ask the workers to stop. They notice within a poll interval, drop the listener and the
+    /// multicast socket, and the port is free for something else -- the LocalSend app, usually.
+    pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        // Wake anything waiting on a consent decision so it does not sit until its timeout.
+        self.decided.notify_all();
+    }
+
+    fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
     fn info(&self) -> Value {
         let inner = self.inner.lock().unwrap();
         json!({
@@ -161,23 +210,41 @@ pub fn start(alias: String, download_dir: PathBuf, preferred: u16) -> Result<Arc
             alias,
             fingerprint: identity.fingerprint.clone(),
             received: Vec::new(),
+            seen: HashMap::new(),
         }),
         decided: Condvar::new(),
+        stopping: AtomicBool::new(false),
     });
 
     let config = Arc::new(tls_config(&identity)?);
     let serving = Arc::clone(&receiver);
+    listener
+        .set_nonblocking(true)
+        .context("configuring the listener")?;
     std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let config = Arc::clone(&config);
-            let receiver = Arc::clone(&serving);
-            // One thread per transfer: a handler blocks for as long as consent takes, so it must
-            // not hold up anything else.
-            std::thread::spawn(move || {
-                if let Err(err) = handle(stream, config, receiver) {
-                    eprintln!("localsend: {err:#}");
+        loop {
+            if serving.stopping() {
+                // Returning drops `listener`, which is what actually frees the port.
+                return;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let config = Arc::clone(&config);
+                    let receiver = Arc::clone(&serving);
+                    // One thread per transfer: a handler blocks for as long as consent takes, so
+                    // it must not hold up anything else.
+                    std::thread::spawn(move || {
+                        if let Err(err) = handle(stream, config, receiver) {
+                            eprintln!("localsend: {err:#}");
+                        }
+                    });
                 }
-            });
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(ACCEPT_POLL);
+                }
+                Err(_) => return,
+            }
         }
     });
 
@@ -233,12 +300,13 @@ struct Request {
 }
 
 fn handle(stream: TcpStream, config: Arc<ServerConfig>, receiver: Arc<Receiver>) -> Result<()> {
+    let peer = stream.peer_addr().ok().map(|address| address.ip());
     stream.set_read_timeout(Some(Duration::from_secs(300)))?;
     stream.set_write_timeout(Some(Duration::from_secs(300)))?;
     let connection = ServerConnection::new(config)?;
     let mut tls = StreamOwned::new(connection, stream);
     let request = read_request(&mut tls)?;
-    let (status, body) = route(&request, &receiver);
+    let (status, body) = route(&request, &receiver, peer);
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -311,10 +379,25 @@ fn json_body(value: Value) -> Vec<u8> {
     serde_json::to_vec(&value).unwrap_or_default()
 }
 
-fn route(request: &Request, receiver: &Arc<Receiver>) -> (&'static str, Vec<u8>) {
+fn route(
+    request: &Request,
+    receiver: &Arc<Receiver>,
+    peer: Option<std::net::IpAddr>,
+) -> (&'static str, Vec<u8>) {
     match (request.method.as_str(), request.path.as_str()) {
         // Both the HTTP discovery fallback and the plain info lookup answer with this device.
         (_, "/api/localsend/v2/register") | ("GET", "/api/localsend/v2/info") => {
+            // A register is the other device announcing itself, so record it: answering without
+            // remembering is how this machine ended up visible to peers it could not itself see.
+            if let (Some(address), Ok(payload)) =
+                (peer, serde_json::from_slice::<Value>(&request.body))
+            {
+                if let Some(device) =
+                    super::device_from_announcement(&payload, address, receiver.port())
+                {
+                    receiver.remember(device);
+                }
+            }
             ("200 OK", json_body(receiver.info()))
         }
         ("POST", "/api/localsend/v2/prepare-upload") => prepare_upload(request, receiver),
@@ -430,6 +513,7 @@ fn prepare_upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str,
                 transfer,
                 decision: Decision::Pending,
                 tokens: HashMap::new(),
+                directory: None,
             },
         );
     }
@@ -463,6 +547,9 @@ fn wait_for_decision(receiver: &Arc<Receiver>, session: &str) -> Decision {
     let deadline = Instant::now() + CONSENT_TIMEOUT;
     let mut inner = receiver.inner.lock().unwrap();
     loop {
+        if receiver.stopping() {
+            return Decision::Declined;
+        }
         let current = inner
             .sessions
             .get(session)
@@ -517,7 +604,12 @@ fn upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str, Vec<u8>
                 json_body(json!({ "message": "unknown file" })),
             );
         };
-        (inner.download_dir.clone(), file.name.clone())
+        // Whatever the transfer was accepted into, falling back to the configured directory.
+        let directory = entry
+            .directory
+            .clone()
+            .unwrap_or_else(|| inner.download_dir.clone());
+        (directory, file.name.clone())
     };
 
     let destination = match unique_path(&directory, &name) {
@@ -592,6 +684,9 @@ fn respond_to_announcements(receiver: Arc<Receiver>) -> Result<()> {
     let socket = super::multicast_socket()?;
     let mut buffer = [0u8; 8192];
     loop {
+        if receiver.stopping() {
+            return Ok(());
+        }
         let (read, from) = match socket.recv_from(&mut buffer) {
             Ok(result) => result,
             Err(err)
@@ -607,12 +702,17 @@ fn respond_to_announcements(receiver: Arc<Receiver>) -> Result<()> {
         let Ok(payload) = serde_json::from_slice::<Value>(&buffer[..read]) else {
             continue;
         };
-        // Only answer devices that asked for answers, and never answer ourselves.
-        if payload.get("announce").and_then(Value::as_bool) != Some(true) {
-            continue;
-        }
         let their_fingerprint = payload.get("fingerprint").and_then(Value::as_str);
         if their_fingerprint == Some(receiver.fingerprint().as_str()) {
+            continue;
+        }
+        // Record every device heard from, announcement or reply alike -- this is the socket that
+        // is always listening, so it is what makes discovery reliable.
+        if let Some(device) = super::parse_announcement(&buffer[..read], from) {
+            receiver.remember(device);
+        }
+        // Only answer devices that asked for answers.
+        if payload.get("announce").and_then(Value::as_bool) != Some(true) {
             continue;
         }
         let mut reply = receiver.info();
