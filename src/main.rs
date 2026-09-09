@@ -1,4 +1,5 @@
 mod api;
+mod capture;
 mod client;
 mod compositor;
 mod config;
@@ -100,6 +101,9 @@ enum ServiceAction {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref())?;
+    // Capture settings are read by both the daemon and the one-shot `api` command, which answers
+    // in-process when no daemon is running, so they are installed before either path runs.
+    capture::configure(&config);
 
     match cli.command {
         Command::Serve { socket } => {

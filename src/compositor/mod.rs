@@ -35,6 +35,34 @@ pub struct Window {
     pub y: i64,
 }
 
+/// Where a window sits on screen, in output-layout pixels.
+///
+/// Kept apart from [`Window`] because not every compositor reports it, and because the two mean
+/// different things: `Window::x` orders windows for the bar, while this names a rectangle a
+/// capture tool can grab. niri lays windows out in scrolling columns and reports a position in
+/// that layout rather than on screen, so it answers `None` here instead of handing a caller
+/// coordinates that do not describe a rectangle on a display.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WindowRegion {
+    /// The same backend-qualified handle [`Window::id`] carries.
+    pub id: String,
+    pub app_id: String,
+    pub title: String,
+    pub monitor: String,
+    pub focused: bool,
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+}
+
+impl WindowRegion {
+    /// The geometry as slurp and grim spell it: `x,y WxH`.
+    pub fn geometry(&self) -> String {
+        format!("{},{} {}x{}", self.x, self.y, self.width, self.height)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Workspace {
     pub id: String,
@@ -75,6 +103,16 @@ pub trait Compositor: Send + Sync {
     }
 
     fn monitors(&self) -> Option<Vec<Monitor>> {
+        None
+    }
+
+    /// Where each window a viewer can currently see sits on screen.
+    ///
+    /// `None` means this backend cannot say -- either it reports no screen-space geometry, or it
+    /// is not running. Callers fall back to asking the user to draw a region rather than guessing.
+    /// Windows on a workspace nobody is looking at are left out: their coordinates name a
+    /// rectangle that is on screen, but showing something else entirely.
+    fn window_regions(&self) -> Option<Vec<WindowRegion>> {
         None
     }
 
@@ -245,6 +283,21 @@ pub fn workspaces() -> Vec<Workspace> {
 
 pub fn monitors() -> Vec<Monitor> {
     first(|backend| backend.monitors()).unwrap_or_default()
+}
+
+/// Visible windows and their on-screen rectangles, or `None` when the running compositor does not
+/// report them. Used by capture to grab a window without the user drawing a box around it.
+pub fn window_regions() -> Option<Vec<WindowRegion>> {
+    first(|backend| backend.window_regions())
+}
+
+/// The monitor the compositor says is focused, by name.
+pub fn focused_monitor() -> Option<String> {
+    monitors()
+        .into_iter()
+        .find(|monitor| monitor.focused)
+        .map(|monitor| monitor.name)
+        .filter(|name| !name.is_empty())
 }
 
 /// Look up the backend named by a `backend:handle` id.

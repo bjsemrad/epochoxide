@@ -18,7 +18,7 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{compositor, localsend, tailscale};
+use crate::{capture, compositor, localsend, tailscale};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -205,6 +205,41 @@ const TAILSCALE: &[Method] = &[
     ),
 ];
 
+const CAPTURE: &[Method] = &[
+    method(
+        "screenshot",
+        "Take a screenshot, save it, and put it on the clipboard",
+        &[
+            (
+                "mode",
+                "optional string: region (default), window, fullscreen, or all",
+            ),
+            (
+                "output",
+                "optional string, a monitor name from compositor.monitors; fullscreen only",
+            ),
+            (
+                "select",
+                "optional bool; in window mode, click the window instead of taking the focused one",
+            ),
+            ("cursor", "optional bool; include the pointer"),
+            ("delay", "optional number of seconds to wait before capturing"),
+            ("copy", "optional bool, defaulting to screenshot_copy"),
+            ("save", "optional bool, defaulting to screenshot_save"),
+            (
+                "directory",
+                "optional string; where to save this shot, defaulting to screenshot_dir",
+            ),
+            ("notify", "optional bool, defaulting to screenshot_notify"),
+        ],
+    ),
+    method(
+        "status",
+        "Where screenshots land, which capture tools are installed, and what this compositor supports",
+        &[],
+    ),
+];
+
 const LOCALSEND: &[Method] = &[
     method("devices", "Discover LocalSend devices on the network", &[]),
     method(
@@ -265,13 +300,13 @@ const GROUPS: &[Group] = &[
         summary: "Tailnet status, machines, and Taildrop",
         methods: TAILSCALE,
     },
-    // Declared so the contract shape is stable and callers can feature-detect, but nothing here
-    // is implemented yet. Each lands with its own build-out step rather than as a stub.
     Group {
         name: "capture",
         summary: "Screenshots, OCR, colour picking, and recording",
-        methods: &[],
+        methods: CAPTURE,
     },
+    // Declared so the contract shape is stable and callers can feature-detect, but nothing here
+    // is implemented yet. Each lands with its own build-out step rather than as a stub.
     Group {
         name: "localsend",
         summary: "LocalSend device discovery and transfers",
@@ -294,6 +329,13 @@ const GROUPS: &[Group] = &[
     },
 ];
 
+/// Methods that answer even when their group is not available here.
+///
+/// A diagnostic is worth calling precisely when the thing it diagnoses is missing: `capture.status`
+/// is how a caller finds out that grim is not installed, so refusing it because grim is not
+/// installed would leave nobody able to ask.
+const ALWAYS_ANSWERS: &[&str] = &["capture.status"];
+
 /// A group's availability is decided at call time, not at startup: a compositor can be restarted
 /// and Tailscale can be installed without EpochOxide being restarted.
 fn availability(group: &str) -> Availability {
@@ -309,6 +351,10 @@ fn availability(group: &str) -> Availability {
                 Availability::Unavailable("the tailscale CLI is not installed".into())
             }
         }
+        "capture" => match capture::available() {
+            Ok(()) => Availability::Available,
+            Err(reason) => Availability::Unavailable(reason),
+        },
         // Discovery needs the multicast port, which is the one thing that can stop this working
         // on an otherwise fine machine.
         "localsend" => match localsend::available() {
@@ -419,6 +465,42 @@ fn optional_directory(params: &Value, key: &str) -> Result<Option<std::path::Pat
     Ok(Some(expanded))
 }
 
+/// A path parameter that does not have to exist yet.
+///
+/// Unlike [`optional_directory`], a missing directory here is created rather than refused: the
+/// caller is naming where its own screenshot should go, and `~/Pictures/Screenshots` not existing
+/// on a fresh machine is the normal case rather than a typo.
+fn optional_path(params: &Value, key: &str) -> Option<std::path::PathBuf> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| std::path::PathBuf::from(shellexpand::tilde(raw).to_string()))
+}
+
+fn param_bool(params: &Value, key: &str) -> Option<bool> {
+    params.get(key).and_then(Value::as_bool)
+}
+
+/// A parameter that may arrive as a number or as the string a shell handed straight through.
+fn param_number(params: &Value, key: &str) -> Result<Option<f64>, ApiError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => Ok(number.as_f64()),
+        Some(Value::String(text)) if text.is_empty() => Ok(None),
+        Some(Value::String(text)) => text.parse().map(Some).map_err(|_| {
+            ApiError::new(
+                ErrorCode::InvalidParams,
+                format!("\"{key}\" must be a number, not \"{text}\""),
+            )
+        }),
+        Some(other) => Err(ApiError::new(
+            ErrorCode::InvalidParams,
+            format!("\"{key}\" must be a number, not {other}"),
+        )),
+    }
+}
+
 fn param_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, ApiError> {
     params
         .get(key)
@@ -492,7 +574,7 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
     };
 
     let status = availability(found.name);
-    if !status.callable() {
+    if !status.callable() && !ALWAYS_ANSWERS.contains(&method) {
         return Err(ApiError::new(
             ErrorCode::Unavailable,
             format!(
@@ -550,6 +632,31 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
         ("tailscale", "receive") => {
             let directory = param_str(params, "directory")?;
             value(tailscale::receive(directory).map_err(backend_error)?)
+        }
+        ("capture", "status") => value(capture::status()),
+        ("capture", "screenshot") => {
+            let mode = match params.get("mode").and_then(Value::as_str) {
+                Some(mode) if !mode.is_empty() => capture::Mode::parse(mode)
+                    .map_err(|err| ApiError::new(ErrorCode::InvalidParams, err.to_string()))?,
+                _ => capture::Mode::default(),
+            };
+            let delay = param_number(params, "delay")?.unwrap_or(0.0).max(0.0);
+            let request = capture::Request {
+                mode,
+                output: params
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .filter(|output| !output.is_empty())
+                    .map(str::to_string),
+                select: param_bool(params, "select").unwrap_or(false),
+                cursor: param_bool(params, "cursor").unwrap_or(false),
+                delay: std::time::Duration::from_secs_f64(delay),
+                copy: param_bool(params, "copy"),
+                save: param_bool(params, "save"),
+                notify: param_bool(params, "notify"),
+                directory: optional_path(params, "directory"),
+            };
+            value(capture::screenshot(&request).map_err(backend_error)?)
         }
         ("localsend", "devices") => value(localsend::devices().map_err(backend_error)?),
         ("localsend", "status") => Ok(match localsend::receiver() {
@@ -663,6 +770,46 @@ mod tests {
     fn describe_needs_no_version_and_no_compositor() {
         let described = dispatch("api.describe", &Value::Null, Some(VERSION_MAJOR)).expect("ok");
         assert!(described["groups"].is_array());
+    }
+
+    #[test]
+    fn a_diagnostic_answers_even_when_its_group_cannot() {
+        // capture.status reports which capture tools are missing, so gating it behind those tools
+        // being present would leave nobody able to ask.
+        for method in ALWAYS_ANSWERS {
+            let (group_name, call) = method.split_once('.').expect("group.method");
+            let found = group(group_name).expect("a real group");
+            assert!(
+                found.methods.iter().any(|m| m.name == call),
+                "{method} is not in the contract"
+            );
+            assert!(dispatch(method, &Value::Null, None).is_ok());
+        }
+    }
+
+    #[test]
+    fn an_unknown_screenshot_mode_is_a_parameter_error() {
+        // Availability depends on grim being installed, so only assert where the group is live.
+        if !availability("capture").callable() {
+            return;
+        }
+        let err = dispatch("capture.screenshot", &json!({ "mode": "panorama" }), None)
+            .expect_err("should refuse");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn a_number_parameter_accepts_the_string_a_shell_hands_through() {
+        assert_eq!(
+            param_number(&json!({ "delay": 3 }), "delay").unwrap(),
+            Some(3.0)
+        );
+        assert_eq!(
+            param_number(&json!({ "delay": "2.5" }), "delay").unwrap(),
+            Some(2.5)
+        );
+        assert_eq!(param_number(&json!({}), "delay").unwrap(), None);
+        assert!(param_number(&json!({ "delay": "soon" }), "delay").is_err());
     }
 
     #[test]

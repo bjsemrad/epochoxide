@@ -43,6 +43,17 @@ pub struct Config {
     pub localsend_download_dir: String,
     /// Name shown to other devices. Empty means use the host name.
     pub localsend_alias: String,
+    /// Where `capture.screenshot` saves. Created on the first shot rather than at startup.
+    pub screenshot_dir: String,
+    /// Name for a saved screenshot, expanded by `date`, so `%Y-%m-%d` means what it says. An
+    /// extension picks the format: `.png` (default), `.jpg`, or `.ppm`.
+    pub screenshot_filename: String,
+    /// Put each screenshot on the clipboard as well as saving it.
+    pub screenshot_copy: bool,
+    /// Keep each screenshot as a file. With this off, shots are copied and left in the cache.
+    pub screenshot_save: bool,
+    /// Announce each screenshot to the session's notification server, which is the shell.
+    pub screenshot_notify: bool,
     pub clipboard_capture_interval_ms: u64,
     pub runner_scan_path: bool,
     pub runner_commands: Vec<RunnerCommand>,
@@ -81,6 +92,11 @@ struct PartialConfig {
     localsend_receive: Option<bool>,
     localsend_download_dir: Option<String>,
     localsend_alias: Option<String>,
+    screenshot_dir: Option<String>,
+    screenshot_filename: Option<String>,
+    screenshot_copy: Option<bool>,
+    screenshot_save: Option<bool>,
+    screenshot_notify: Option<bool>,
     clipboard_capture_interval_ms: Option<u64>,
     runner_scan_path: Option<bool>,
     runner_commands: Option<Vec<RunnerCommand>>,
@@ -117,6 +133,11 @@ impl Default for Config {
             localsend_receive: true,
             localsend_download_dir: "~/Downloads".into(),
             localsend_alias: String::new(),
+            screenshot_dir: home.join("Pictures/Screenshots").display().to_string(),
+            screenshot_filename: "screenshot-%Y%m%d-%H%M%S.png".into(),
+            screenshot_copy: true,
+            screenshot_save: true,
+            screenshot_notify: true,
             clipboard_capture_interval_ms: 250,
             runner_scan_path: true,
             runner_commands: Vec::new(),
@@ -195,6 +216,21 @@ impl Config {
         if let Some(v) = partial.clipboard_ocr {
             cfg.clipboard_ocr = v;
         }
+        if let Some(v) = partial.screenshot_dir {
+            cfg.screenshot_dir = v;
+        }
+        if let Some(v) = partial.screenshot_filename {
+            cfg.screenshot_filename = v;
+        }
+        if let Some(v) = partial.screenshot_copy {
+            cfg.screenshot_copy = v;
+        }
+        if let Some(v) = partial.screenshot_save {
+            cfg.screenshot_save = v;
+        }
+        if let Some(v) = partial.screenshot_notify {
+            cfg.screenshot_notify = v;
+        }
         if let Some(v) = partial.clipboard_capture_interval_ms {
             cfg.clipboard_capture_interval_ms = v;
         }
@@ -237,6 +273,7 @@ impl Config {
         self.ignored_dirs = self.ignored_dirs.iter().map(|p| expand(p)).collect();
         self.menus_dir = expand(&self.menus_dir);
         self.clipboard_image_dir = expand(&self.clipboard_image_dir);
+        self.screenshot_dir = expand(&self.screenshot_dir);
         self.icon_cache_dir = expand(&self.icon_cache_dir);
     }
 }

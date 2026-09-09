@@ -3,7 +3,7 @@
 use super::ipc::{
     hypr_ipc, hypr_output, hypr_watch, hypr_window_dispatch, hypr_workspace_dispatch,
 };
-use super::{Compositor, Monitor, Window, Workspace};
+use super::{Compositor, Monitor, Window, WindowRegion, Workspace};
 use anyhow::Result;
 use serde_json::Value;
 
@@ -105,6 +105,29 @@ impl Compositor for Hyprland {
         )
     }
 
+    fn window_regions(&self) -> Option<Vec<WindowRegion>> {
+        let clients = json("j/clients", &["clients", "-j"])?;
+        let monitors = json("j/monitors", &["monitors", "-j"])?;
+        let active = json("j/activewindow", &["activewindow", "-j"])
+            .and_then(|value| string(&value, "address"));
+        let visible = visible_workspaces(&monitors);
+        let monitor_names: Vec<String> = self
+            .monitors()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|monitor| monitor.name)
+            .collect();
+        Some(
+            clients
+                .as_array()?
+                .iter()
+                .filter(|client| on_screen(client, &visible))
+                .map(|client| region(client, active.as_deref(), &monitor_names))
+                .filter(|region| region.width > 0 && region.height > 0)
+                .collect(),
+        )
+    }
+
     fn focus_window(&self, handle: &str) -> Result<()> {
         hypr_window_dispatch("focuswindow", "hl.dsp.focus({ window = w })", handle)
     }
@@ -158,6 +181,77 @@ fn window(client: &Value, active: Option<&str>, monitor_names: &[String]) -> Win
     }
 }
 
+/// Map one `hyprctl clients` entry onto its on-screen rectangle.
+fn region(client: &Value, active: Option<&str>, monitor_names: &[String]) -> WindowRegion {
+    let address = string(client, "address").unwrap_or_default();
+    let monitor_index = client.get("monitor").and_then(Value::as_i64).unwrap_or(-1);
+    WindowRegion {
+        focused: active == Some(address.as_str()),
+        id: format!("hypr:{address}"),
+        app_id: string(client, "class").unwrap_or_default(),
+        title: string(client, "title").unwrap_or_default(),
+        monitor: usize::try_from(monitor_index)
+            .ok()
+            .and_then(|index| monitor_names.get(index).cloned())
+            .unwrap_or_default(),
+        x: at(client, 0),
+        y: at(client, 1),
+        width: size(client, 0),
+        height: size(client, 1),
+    }
+}
+
+/// The workspace ids a viewer can actually see: the one each monitor is showing, plus any special
+/// workspace pulled over it.
+fn visible_workspaces(monitors: &Value) -> Vec<i64> {
+    let Some(monitors) = monitors.as_array() else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for monitor in monitors {
+        for key in ["activeWorkspace", "specialWorkspace"] {
+            let id = monitor
+                .get(key)
+                .and_then(|workspace| workspace.get("id"))
+                .and_then(Value::as_i64);
+            // A monitor with no special workspace open reports id 0, which is not a workspace.
+            if let Some(id) = id.filter(|id| *id != 0) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// Whether a window is on screen right now. `mapped`/`hidden` cover minimized and grouped
+/// windows; the workspace check covers the far more common case of a window sitting at real
+/// coordinates on a workspace nobody is currently looking at.
+fn on_screen(client: &Value, visible: &[i64]) -> bool {
+    let mapped = client
+        .get("mapped")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let hidden = client
+        .get("hidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let workspace = client
+        .get("workspace")
+        .and_then(|workspace| workspace.get("id"))
+        .and_then(Value::as_i64);
+    mapped && !hidden && workspace.is_some_and(|id| visible.contains(&id))
+}
+
+/// Hyprland reports a window's size as `size: [width, height]`.
+fn size(client: &Value, index: usize) -> i64 {
+    client
+        .get("size")
+        .and_then(Value::as_array)
+        .and_then(|pair| pair.get(index))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+}
+
 /// Hyprland reports a window's position as `at: [x, y]`.
 fn at(client: &Value, index: usize) -> i64 {
     client
@@ -198,6 +292,43 @@ mod tests {
         // A monitor unplugged between the two queries would otherwise panic or mislabel.
         let mapped = window(&client(), None, &["eDP-1".to_string()]);
         assert_eq!(mapped.monitor, "");
+    }
+
+    #[test]
+    fn a_region_carries_the_on_screen_rectangle() {
+        let mut raw = client();
+        raw["at"] = json!([1920, 40]);
+        raw["size"] = json!([1280, 800]);
+        let region = region(&raw, Some("0xabc"), &["eDP-1".into(), "DP-3".into()]);
+        assert_eq!(region.geometry(), "1920,40 1280x800");
+        assert_eq!(region.monitor, "DP-3");
+        assert!(region.focused);
+    }
+
+    #[test]
+    fn only_windows_on_a_visible_workspace_count_as_on_screen() {
+        // Workspace 4 holds the window; the monitors are showing 1 and 7.
+        assert!(!on_screen(&client(), &[1, 7]));
+        assert!(on_screen(&client(), &[1, 4]));
+    }
+
+    #[test]
+    fn an_unmapped_or_hidden_window_is_not_on_screen() {
+        let mut hidden = client();
+        hidden["hidden"] = json!(true);
+        assert!(!on_screen(&hidden, &[4]));
+        let mut unmapped = client();
+        unmapped["mapped"] = json!(false);
+        assert!(!on_screen(&unmapped, &[4]));
+    }
+
+    #[test]
+    fn a_monitor_with_no_special_workspace_contributes_no_id() {
+        let monitors = json!([
+            { "activeWorkspace": { "id": 4 }, "specialWorkspace": { "id": 0 } },
+            { "activeWorkspace": { "id": 7 }, "specialWorkspace": { "id": -98 } },
+        ]);
+        assert_eq!(visible_workspaces(&monitors), vec![4, 7, -98]);
     }
 
     #[test]

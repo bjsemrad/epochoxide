@@ -1,0 +1,64 @@
+name = "capture"
+name_pretty = "Capture"
+description = "Take a screenshot"
+icon = "camera-photo"
+
+# Every entry is a mode `epochctl capture screenshot` already understands, so the launcher, a
+# keybinding, and a script all take the same picture.
+action = "epochctl capture screenshot %VALUE%"
+
+# The launcher closes as it activates an entry, but closing is not instant: a mode that captures
+# without stopping to ask the user something would otherwise photograph the launcher on its way
+# out. Half a second is the compositor's next frame, and it is only spent where it is needed --
+# region and window-picking already wait on a person.
+
+[[entries]]
+text = "Region"
+subtext = "Drag out a rectangle"
+value = "region"
+keywords = ["screenshot", "area", "select", "crop", "snip"]
+
+[[entries]]
+text = "Region to clipboard"
+subtext = "Copy it without keeping a file"
+value = "region --no-save"
+keywords = ["screenshot", "copy", "paste", "temporary"]
+
+[[entries]]
+text = "Focused window"
+subtext = "The window you were just in"
+value = "window --delay 0.5"
+keywords = ["screenshot", "app", "active"]
+
+[[entries]]
+text = "Pick a window"
+subtext = "Click the window to capture"
+value = "window --select"
+keywords = ["screenshot", "choose", "click"]
+
+[[entries]]
+text = "This monitor"
+subtext = "The whole focused screen"
+value = "fullscreen --delay 0.5"
+keywords = ["screenshot", "display", "screen", "monitor"]
+
+[[entries]]
+text = "All monitors"
+subtext = "Every screen as one image"
+value = "all --delay 0.5"
+keywords = ["screenshot", "desktop", "everything"]
+
+[[entries]]
+text = "Region in 3 seconds"
+subtext = "Time to open the menu you want in the shot"
+value = "region --delay 3"
+keywords = ["screenshot", "delay", "timer", "menu"]
+
+[[entries]]
+text = "Screenshots folder"
+subtext = "Open where shots are saved"
+value = "~/Pictures/Screenshots"
+keywords = ["screenshot", "folder", "open", "files"]
+
+[entries.actions]
+default = "xdg-open %VALUE%"

@@ -71,6 +71,13 @@
         # $EDITOR-sensing default keeps working for Nix-managed installs.
         clipboard_image_editor = "";
         clipboard_ocr = false;
+        # Screenshots. The filename is expanded by date(1), so strftime escapes work, and its
+        # extension picks the format: .png (default), .jpg, or .ppm.
+        screenshot_dir = "~/Pictures/Screenshots";
+        screenshot_filename = "screenshot-%Y%m%d-%H%M%S.png";
+        screenshot_copy = true;
+        screenshot_save = true;
+        screenshot_notify = true;
         clipboard_capture_interval_ms = 250;
         runner_scan_path = true;
         runner_commands = [ ];
@@ -122,6 +129,12 @@
           imagemagick
           librsvg
           fd
+          # Capture. grim and slurp are wlroots screencopy tools rather than compositor-specific
+          # ones, so the same pair serves Hyprland, niri, and sway. libnotify supplies
+          # notify-send, which is how a finished capture reaches the shell's notification server.
+          grim
+          slurp
+          libnotify
         ];
     in
     {

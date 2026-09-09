@@ -16,6 +16,16 @@ localsend_receive = true
 localsend_download_dir = "~/Downloads"
 # Name other devices see. Empty means use the host name.
 localsend_alias = ""
+# Screenshots. `epochctl capture screenshot [region|window|fullscreen|all]`.
+# screenshot_filename is expanded by date(1), so strftime escapes work; its extension picks the
+# format (.png, .jpg, .ppm). Every shot is copied to the clipboard and saved by default, and
+# announced to the notification server -- which is the shell itself.
+screenshot_dir = "~/Pictures/Screenshots"
+screenshot_filename = "screenshot-%Y%m%d-%H%M%S.png"
+screenshot_copy = true
+screenshot_save = true
+screenshot_notify = true
+
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 icon_theme = ""
@@ -56,7 +66,7 @@ clipboard = 0
 
 # Each menu in menus_dir is its own provider, named after the menu, and takes a prefix here.
 "?" = "keybinds"
-"!" = "screenshots"
+"!" = "capture"
 
 [[runner_commands]]
 name = "Edit Config"

@@ -19,6 +19,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - Persistent usage history and recency-aware ranking.
 - Nix flake package, Home Manager module, and NixOS module.
 - JSON-over-Unix-socket protocol for easy shell integration.
+- Screenshots -- region, window, monitor, or the whole layout -- saved, copied, and announced.
 - Versioned Epoch API for normalized compositor state and Tailscale, independent of the launcher.
 
 ## Why
@@ -303,6 +304,11 @@ clipboard_image_dir = "~/.cache/epochoxide/clipboard/images"
 clipboard_text_editor = "xdg-open"
 clipboard_image_editor = ""
 clipboard_ocr = false
+screenshot_dir = "~/Pictures/Screenshots"
+screenshot_filename = "screenshot-%Y%m%d-%H%M%S.png"
+screenshot_copy = true
+screenshot_save = true
+screenshot_notify = true
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 
@@ -349,23 +355,27 @@ An entry either runs something or hands back text. `value` is substituted into t
 clipboard and runs nothing, so command menus and snippet menus can share a file.
 
 ```toml
-name = "screenshots"
-name_pretty = "Screenshots"
-icon = "applications-graphics"
-action = "%VALUE%"
+name = "capture"
+name_pretty = "Capture"
+icon = "camera-photo"
+action = "epochctl capture screenshot %VALUE%"
+
+[[entries]]
+text = "Region"
+value = "region"
 
 [[entries]]
 text = "Region to clipboard"
-value = "grim -g \"$(slurp)\" - | wl-copy"
-
-[[entries]]
-text = "Record screen"
-value = "wf-recorder -f ~/Videos/$(date +%s).mp4"
+value = "region --no-save"
 
 [[entries]]
 text = "Shrug"
 copy = "¯\\_(ツ)_/¯"
 ```
+
+`examples/menus/capture.toml` is the full version of that menu: every screenshot mode, a delayed
+one, and an entry that opens the folder. Copy it into `menus_dir` and give it a prefix to have the
+launcher offer capture modes as you type.
 
 ### Entry fields
 
@@ -487,8 +497,8 @@ epochoxide api api.describe
 contract version: 1.0
   compositor   available    7 methods
   tailscale    available    3 methods
-  capture      planned      0 methods   not implemented in this build
-  localsend    planned      0 methods   not implemented in this build
+  capture      available    2 methods
+  localsend    available    9 methods
   dev          planned      0 methods   not implemented in this build
   nix          planned      0 methods   not implemented in this build
   system       planned      0 methods   not implemented in this build
@@ -559,6 +569,56 @@ Backends live one per file under `src/compositor/`, each an implementation of th
 trait. Hyprland, niri, and sway are supported, with wmctrl as an X11 fallback that can only list
 and focus windows. The backend that answers is detected at call time, so a compositor restart
 does not need a daemon restart. Adding one means adding a module and a line in `backends()`.
+
+### Capture
+
+```bash
+epochoxide api capture.screenshot                                     # drag out a region
+epochoxide api capture.screenshot --params '{"mode":"window"}'        # the focused window
+epochoxide api capture.screenshot --params '{"mode":"window","select":true}'
+epochoxide api capture.screenshot --params '{"mode":"fullscreen"}'    # the focused monitor
+epochoxide api capture.screenshot --params '{"mode":"fullscreen","output":"DP-3"}'
+epochoxide api capture.screenshot --params '{"mode":"all"}'           # every monitor, one image
+epochoxide api capture.screenshot --params '{"save":false,"cursor":true,"delay":3}'
+epochoxide api capture.status
+```
+
+```json
+{
+  "cancelled": false,
+  "mode": "window",
+  "path": "/home/you/Pictures/Screenshots/screenshot-20260112-144233.png",
+  "saved": true,
+  "copied": true,
+  "notified": true,
+  "geometry": "6,46 2148x1388",
+  "output": null,
+  "window": "thor: epochoxide",
+  "width": 2864,
+  "height": 1850,
+  "bytes": 305481
+}
+```
+
+A shot is saved to `screenshot_dir`, copied to the clipboard, and announced with `notify-send` --
+which EpochShell answers, since it is the session's notification server. The notification carries
+the file path as its image hint, so the shell shows the shot itself rather than a camera icon.
+`copy`, `save`, `notify`, and `directory` override those defaults per call; leaving one out keeps
+the configured behaviour rather than this API's opinion of it.
+
+Cancelling a selection answers `{"cancelled": true}` with `ok: true`. Pressing Escape is how
+people change their mind, and a keybinding should not report a failure for it.
+
+The pixels come from `grim` and the selection from `slurp`, which are wlroots screencopy tools
+rather than compositor-specific ones, so the same path serves Hyprland, niri, and sway. What *is*
+compositor-specific -- where a window is on screen, and which monitor is focused -- is asked of the
+normalized compositor layer, so no `hyprctl` payload reaches capture. A compositor that does not
+report screen-space geometry (niri lays windows out in scrolling columns) reports
+`window_capture: false` from `capture.status`, and `mode: "window"` there says so rather than
+capturing the wrong rectangle.
+
+`capture.status` answers even when the group is unavailable: it is how a caller finds out that
+grim is not installed, so it would be useless if a missing grim silenced it.
 
 ### Tailscale
 
@@ -826,7 +886,9 @@ Direct persistent socket integration avoids process startup per keystroke and is
 
 Some providers call common desktop tools when available:
 
-- `wl-clipboard` for clipboard text/image capture.
+- `wl-clipboard` for clipboard text/image capture, and for putting screenshots on the clipboard.
+- `grim` and `slurp` for screenshots and region selection.
+- `libnotify` for `notify-send`, which announces a finished capture.
 - `tesseract` for OCR.
 - `xdg-utils` for opening files/apps.
 - `wmctrl` for X11 window focus.
