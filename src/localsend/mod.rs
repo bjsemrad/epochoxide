@@ -95,11 +95,12 @@ fn alias() -> String {
 }
 
 fn own_fingerprint() -> String {
-    // Once the receiver is up, the announced fingerprint has to be its certificate hash: that is
-    // what a peer pins when it sends to us. The derived value below is only a stand-in for a
-    // daemon that is not accepting transfers.
-    if let Some(receiver) = receiver() {
-        return receiver.fingerprint();
+    // The announced fingerprint has to hash the certificate this machine actually presents, at
+    // both ends: a peer pins it when it sends to us, and checks the client certificate against it
+    // when we send to a peer. The derived value below is only a stand-in for a machine that could
+    // not load an identity at all.
+    if let Ok(identity) = cert::shared() {
+        return identity.fingerprint.clone();
     }
     let seed = format!("epochoxide:{}", alias());
     let digest = ring::digest::digest(&ring::digest::SHA256, seed.as_bytes());

@@ -5,9 +5,10 @@
 //! certificate has to be generated once and kept, not regenerated per run: a new one every start
 //! would look like a brand new device each time and invalidate any pinning a peer had done.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 pub struct Identity {
     /// PEM-encoded certificate.
@@ -16,6 +17,43 @@ pub struct Identity {
     pub key_pem: String,
     /// SHA-256 of the certificate DER, uppercase hex -- the form LocalSend announces.
     pub fingerprint: String,
+}
+
+impl Identity {
+    /// The certificate as rustls wants it. Both ends need this: the receiver presents it to
+    /// senders, and a sender presents the very same one when a peer asks for a client
+    /// certificate.
+    pub fn chain(&self) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        let der = der_from_pem(&self.certificate_pem)
+            .ok_or_else(|| anyhow!("could not read the certificate"))?;
+        Ok(vec![rustls::pki_types::CertificateDer::from(der)])
+    }
+
+    pub fn key(&self) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+        let der =
+            der_from_pem(&self.key_pem).ok_or_else(|| anyhow!("could not read the private key"))?;
+        rustls::pki_types::PrivateKeyDer::try_from(der)
+            .map_err(|err| anyhow!("unusable private key: {err}"))
+    }
+}
+
+/// The identity, loaded once and shared.
+///
+/// Every outbound request needs it now that connections carry a client certificate, and reading
+/// two files off disk per upload -- or worse, racing two threads into generating a fresh identity
+/// on first use -- is not worth it.
+static IDENTITY: Mutex<Option<Arc<Identity>>> = Mutex::new(None);
+
+pub fn shared() -> Result<Arc<Identity>> {
+    let mut slot = IDENTITY
+        .lock()
+        .map_err(|_| anyhow!("the identity lock is poisoned"))?;
+    if let Some(identity) = slot.as_ref() {
+        return Ok(Arc::clone(identity));
+    }
+    let identity = Arc::new(load_or_create()?);
+    *slot = Some(Arc::clone(&identity));
+    Ok(identity)
 }
 
 fn state_dir() -> PathBuf {

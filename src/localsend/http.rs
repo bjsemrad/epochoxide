@@ -9,7 +9,11 @@
 //! fingerprint of its certificate over multicast, and a connection is accepted only if the
 //! certificate presented hashes to that value. Accepting any certificate instead would let
 //! anything on the LAN impersonate a device and receive the files.
+//!
+//! That pinning runs both ways: LocalSend receivers ask the connecting client for a certificate,
+//! so this presents the same identity it announces rather than connecting anonymously.
 
+use super::cert;
 use anyhow::{anyhow, bail, Context, Result};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -241,12 +245,18 @@ impl Endpoint {
 
     fn exchange_tls(&self, request: &[u8]) -> Result<Vec<u8>> {
         let verifier = Arc::new(PinnedFingerprint::new(&self.fingerprint)?);
+        // LocalSend's receiver requests a client certificate, and TLS 1.3 answers an empty one
+        // with a "certificate required" alert -- which is what a send failed with before this
+        // was sent. It has to be the certificate whose fingerprint the announcement carried,
+        // since that is the identity the peer records the transfer against.
+        let identity = cert::shared().context("loading this device's LocalSend certificate")?;
         let config =
             ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
                 .with_safe_default_protocol_versions()?
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
-                .with_no_client_auth();
+                .with_client_auth_cert(identity.chain()?, identity.key()?)
+                .context("presenting this device's certificate")?;
 
         // The certificate is self-signed and carries no useful name, so the SNI value is
         // irrelevant to trust here -- the fingerprint check above is what decides.

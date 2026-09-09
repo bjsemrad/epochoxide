@@ -199,7 +199,7 @@ impl Receiver {
 /// whichever port was taken, and senders honour it, so a LocalSend app already holding the
 /// standard port is a fallback rather than a failure.
 pub fn start(alias: String, download_dir: PathBuf, preferred: u16) -> Result<Arc<Receiver>> {
-    let identity = cert::load_or_create()?;
+    let identity = cert::shared()?;
     let (listener, port) = bind(preferred)?;
 
     let receiver = Arc::new(Receiver {
@@ -272,24 +272,11 @@ fn bind(preferred: u16) -> Result<(TcpListener, u16)> {
 }
 
 fn tls_config(identity: &cert::Identity) -> Result<ServerConfig> {
-    let certs = rustls_pemfile_certs(&identity.certificate_pem)?;
-    let key = rustls_pemfile_key(&identity.key_pem)?;
     ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()?
         .with_no_client_auth()
-        .with_single_cert(certs, key)
+        .with_single_cert(identity.chain()?, identity.key()?)
         .context("building the TLS configuration")
-}
-
-fn rustls_pemfile_certs(pem: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    let der = cert::der_from_pem(pem).ok_or_else(|| anyhow!("could not read the certificate"))?;
-    Ok(vec![rustls::pki_types::CertificateDer::from(der)])
-}
-
-fn rustls_pemfile_key(pem: &str) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
-    let der = cert::der_from_pem(pem).ok_or_else(|| anyhow!("could not read the private key"))?;
-    rustls::pki_types::PrivateKeyDer::try_from(der)
-        .map_err(|err| anyhow!("unusable private key: {err}"))
 }
 
 struct Request {
@@ -317,8 +304,14 @@ fn handle(stream: TcpStream, config: Arc<ServerConfig>, receiver: Arc<Receiver>)
     Ok(())
 }
 
-/// Read one request, using Content-Length to know where the body ends.
-fn read_request(stream: &mut dyn Read) -> Result<Request> {
+/// Read one request, honouring whichever framing the sender chose.
+///
+/// Both framings turn up in practice. A sender that knows the size up front sends a
+/// Content-Length; LocalSend's own client streams file uploads instead and frames them with
+/// `Transfer-Encoding: chunked`, the same way its server answers us (see `http::parse_response`).
+/// Reading only Content-Length made a chunked upload look like a zero-length body, which is how
+/// an accepted transfer landed on disk as an empty file.
+fn read_request<S: Read + Write>(stream: &mut S) -> Result<Request> {
     let mut raw = Vec::new();
     let mut chunk = [0u8; 8192];
     let head_end = loop {
@@ -351,21 +344,44 @@ fn read_request(stream: &mut dyn Read) -> Result<Request> {
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect();
 
-    let length: usize = lines
+    let headers: Vec<(&str, &str)> = lines
         .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse().ok())
-        .unwrap_or(0);
+        .map(|(name, value)| (name.trim(), value.trim()))
+        .collect();
+    let header = |wanted: &str| {
+        headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+            .map(|(_, value)| *value)
+    };
 
+    // Whatever arrived alongside the head is already the start of the body.
     let mut body = raw[head_end + 4..].to_vec();
-    while body.len() < length {
-        let read = stream.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..read]);
+
+    // A sender that asks permission first will not send a byte until it is told to go ahead --
+    // curl does this for any sizeable upload -- so silence here reads to it as a stall.
+    if body.is_empty()
+        && header("expect").is_some_and(|value| value.eq_ignore_ascii_case("100-continue"))
+    {
+        stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+        stream.flush()?;
     }
-    body.truncate(length);
+
+    if header("transfer-encoding").is_some_and(|value| value.to_lowercase().contains("chunked")) {
+        body = read_chunked(stream, body)?;
+    } else {
+        let length: usize = header("content-length")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        while body.len() < length {
+            let read = stream.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..read]);
+        }
+        body.truncate(length);
+    }
 
     Ok(Request {
         method,
@@ -373,6 +389,67 @@ fn read_request(stream: &mut dyn Read) -> Result<Request> {
         query,
         body,
     })
+}
+
+/// Read a chunked body: repeating `<hex size>CRLF<bytes>CRLF`, ending at a zero-size chunk.
+///
+/// `buffered` is however much of the body already came in with the head. Chunked framing declares
+/// no total up front, so `MAX_FILE_BYTES` is the only thing bounding what a sender can push here.
+fn read_chunked<S: Read>(stream: &mut S, buffered: Vec<u8>) -> Result<Vec<u8>> {
+    let mut pending = buffered;
+    let mut body: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+
+    // Pull until `pending` holds at least `wanted` bytes, reporting whether the sender ran out.
+    let mut fill = |pending: &mut Vec<u8>, wanted: usize, stream: &mut S| -> Result<bool> {
+        while pending.len() < wanted {
+            let read = stream.read(&mut chunk)?;
+            if read == 0 {
+                return Ok(false);
+            }
+            pending.extend_from_slice(&chunk[..read]);
+        }
+        Ok(true)
+    };
+
+    loop {
+        // Every chunk opens with its size on a line of its own.
+        let line_end = loop {
+            if let Some(position) = pending.windows(2).position(|window| window == b"\r\n") {
+                break position;
+            }
+            if pending.len() > 1024 {
+                return Err(anyhow!("the sender's chunk header was unreasonably long"));
+            }
+            let more = pending.len() + 1;
+            if !fill(&mut pending, more, stream)? {
+                return Err(anyhow!("the sender closed the connection mid-transfer"));
+            }
+        };
+        let header = String::from_utf8_lossy(&pending[..line_end]).to_string();
+        // A chunk size may carry extensions after a semicolon.
+        let size_text = header.split(';').next().unwrap_or_default().trim();
+        let size = usize::from_str_radix(size_text, 16)
+            .map_err(|_| anyhow!("the sender used an unreadable chunk size \"{size_text}\""))?;
+        pending.drain(..line_end + 2);
+        if size == 0 {
+            break;
+        }
+        if body.len() as u64 + size as u64 > MAX_FILE_BYTES {
+            return Err(anyhow!("the upload is larger than this receiver accepts"));
+        }
+        // The chunk's bytes plus the CRLF closing it.
+        let complete = fill(&mut pending, size + 2, stream)?;
+        let taken = size.min(pending.len());
+        body.extend_from_slice(&pending[..taken]);
+        pending.drain(..(taken + 2).min(pending.len()));
+        if !complete {
+            // A sender that hangs up without its final zero chunk still delivered what arrived.
+            break;
+        }
+    }
+
+    Ok(body)
 }
 
 fn json_body(value: Value) -> Vec<u8> {
@@ -582,7 +659,7 @@ fn upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str, Vec<u8>
         );
     };
 
-    let (directory, name) = {
+    let (directory, name, offered) = {
         let inner = receiver.inner.lock().unwrap();
         let Some(entry) = inner.sessions.get(session) else {
             return (
@@ -609,8 +686,24 @@ fn upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str, Vec<u8>
             .directory
             .clone()
             .unwrap_or_else(|| inner.download_dir.clone());
-        (directory, file.name.clone())
+        (directory, file.name.clone(), file.size)
     };
+
+    // The body has to be the size that was offered and accepted. Anything else means the request
+    // was framed in a way this server misread, and writing it anyway is how a truncated -- or
+    // empty -- file ends up on disk looking like a completed transfer. A sender that offered no
+    // size gets the benefit of the doubt, since there is nothing to check against.
+    if offered > 0 && request.body.len() as u64 != offered {
+        return (
+            "400 Bad Request",
+            json_body(json!({
+                "message": format!(
+                    "expected {offered} bytes of \"{name}\" but the body held {}",
+                    request.body.len()
+                )
+            })),
+        );
+    }
 
     let destination = match unique_path(&directory, &name) {
         Ok(path) => path,
@@ -766,10 +859,49 @@ mod tests {
         }
     }
 
+    /// One canned request, handed over in `per_read`-sized pieces, with whatever the server
+    /// writes back kept for inspection. Real requests arrive split across reads, and a body
+    /// reader that only works when everything lands in one go is the bug this guards.
+    struct Wire {
+        incoming: Vec<u8>,
+        outgoing: Vec<u8>,
+        per_read: usize,
+    }
+
+    impl Wire {
+        fn new(request: &[u8], per_read: usize) -> Self {
+            Self {
+                incoming: request.to_vec(),
+                outgoing: Vec::new(),
+                per_read,
+            }
+        }
+    }
+
+    impl Read for Wire {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let take = self.per_read.min(buf.len()).min(self.incoming.len());
+            buf[..take].copy_from_slice(&self.incoming[..take]);
+            self.incoming.drain(..take);
+            Ok(take)
+        }
+    }
+
+    impl Write for Wire {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.outgoing.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn a_request_is_split_into_method_path_query_and_body() {
         let raw = b"POST /api/localsend/v2/upload?sessionId=a&fileId=0&token=t HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
-        let request = read_request(&mut &raw[..]).unwrap();
+        let request = read_request(&mut Wire::new(raw, 8192)).unwrap();
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/api/localsend/v2/upload");
         assert_eq!(request.query.get("sessionId").unwrap(), "a");
@@ -781,8 +913,153 @@ mod tests {
     fn a_body_longer_than_content_length_is_truncated() {
         // Never write more than the sender declared.
         let raw = b"POST /x HTTP/1.1\r\nContent-Length: 2\r\n\r\nhello";
-        let request = read_request(&mut &raw[..]).unwrap();
+        let request = read_request(&mut Wire::new(raw, 8192)).unwrap();
         assert_eq!(request.body, b"he");
+    }
+
+    #[test]
+    fn a_chunked_upload_is_reassembled() {
+        // LocalSend streams file uploads, so they carry no Content-Length at all. Reading only
+        // Content-Length made every one of these an empty body -- and an empty file on disk.
+        let raw = b"POST /api/localsend/v2/upload?sessionId=a&fileId=0&token=t HTTP/1.1\r\n                    Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let request = read_request(&mut Wire::new(raw, 8192)).unwrap();
+        assert_eq!(request.body, b"hello world");
+    }
+
+    #[test]
+    fn a_chunked_upload_split_across_reads_is_reassembled() {
+        // A byte at a time is the worst case: every size line and every chunk straddles a read.
+        let raw = b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
+        for per_read in [1, 2, 7, 8192] {
+            let request = read_request(&mut Wire::new(raw, per_read)).unwrap();
+            assert_eq!(request.body, b"abcde", "per_read {per_read}");
+        }
+    }
+
+    #[test]
+    fn a_chunk_size_may_carry_extensions() {
+        let raw =
+            b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;name=v\r\nhello\r\n0\r\n\r\n";
+        assert_eq!(read_request(&mut Wire::new(raw, 3)).unwrap().body, b"hello");
+    }
+
+    #[test]
+    fn a_sender_that_asks_before_uploading_is_told_to_go_ahead() {
+        // curl sends this for any sizeable body and will not start until it is answered.
+        let raw = b"POST /x HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello";
+        let mut wire = Wire::new(raw, 8192);
+        // The head has to arrive on its own, the way it does when the sender is waiting.
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        wire.per_read = split;
+        let request = read_request(&mut wire).unwrap();
+        assert_eq!(wire.outgoing, b"HTTP/1.1 100 Continue\r\n\r\n");
+        assert_eq!(request.body, b"hello");
+    }
+
+    #[test]
+    fn a_request_with_no_body_framing_has_no_body() {
+        // `/info` and the discovery fallback send neither header, and must not hang waiting.
+        let raw = b"GET /api/localsend/v2/info HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert!(read_request(&mut Wire::new(raw, 8192))
+            .unwrap()
+            .body
+            .is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_chunk_size_is_refused() {
+        let raw = b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n";
+        assert!(read_request(&mut Wire::new(raw, 8192)).is_err());
+    }
+
+    /// A receiver holding one accepted transfer, ready for `upload` to be called against it.
+    fn accepted(directory: &Path, size: u64) -> Arc<Receiver> {
+        let file = IncomingFile {
+            id: "0".to_string(),
+            name: "notes.txt".to_string(),
+            size,
+            saved_to: None,
+        };
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            "s".to_string(),
+            Session {
+                transfer: IncomingTransfer {
+                    session: "s".to_string(),
+                    device: "Phone".to_string(),
+                    fingerprint: "ab12".to_string(),
+                    files: vec![file],
+                    requested_at: 0,
+                },
+                decision: Decision::Accepted,
+                tokens: HashMap::from([("0".to_string(), "t".to_string())]),
+                directory: Some(directory.to_path_buf()),
+            },
+        );
+        Arc::new(Receiver {
+            inner: Mutex::new(Inner {
+                sessions,
+                download_dir: directory.to_path_buf(),
+                port: 53317,
+                alias: "Epoch".to_string(),
+                fingerprint: "cd34".to_string(),
+                received: Vec::new(),
+                seen: HashMap::new(),
+            }),
+            decided: Condvar::new(),
+            stopping: AtomicBool::new(false),
+        })
+    }
+
+    fn upload_request(body: &[u8]) -> Request {
+        Request {
+            method: "POST".to_string(),
+            path: "/api/localsend/v2/upload".to_string(),
+            query: HashMap::from([
+                ("sessionId".to_string(), "s".to_string()),
+                ("fileId".to_string(), "0".to_string()),
+                ("token".to_string(), "t".to_string()),
+            ]),
+            body: body.to_vec(),
+        }
+    }
+
+    #[test]
+    fn an_accepted_file_is_written_whole() {
+        let dir = tempdir().unwrap();
+        let receiver = accepted(dir.path(), 5);
+        let (status, _) = upload(&upload_request(b"hello"), &receiver);
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(receiver.received().len(), 1);
+    }
+
+    #[test]
+    fn a_body_that_does_not_match_what_was_offered_is_refused() {
+        // The symptom this backstops: a body the server misread arriving as nothing, and being
+        // written out as a zero-byte file that looks like a completed transfer.
+        let dir = tempdir().unwrap();
+        let receiver = accepted(dir.path(), 5);
+        let (status, _) = upload(&upload_request(b""), &receiver);
+        assert_eq!(status, "400 Bad Request");
+        assert!(!dir.path().join("notes.txt").exists());
+        assert!(receiver.received().is_empty());
+    }
+
+    #[test]
+    fn a_sender_that_offered_no_size_is_taken_at_its_word() {
+        // Nothing to check against, so the bytes are written rather than refused.
+        let dir = tempdir().unwrap();
+        let receiver = accepted(dir.path(), 0);
+        let (status, _) = upload(&upload_request(b"hello"), &receiver);
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
