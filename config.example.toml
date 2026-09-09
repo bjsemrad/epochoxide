@@ -9,6 +9,13 @@ clipboard_image_dir = "~/.cache/epochoxide/clipboard/images"
 clipboard_text_editor = "xdg-open"
 clipboard_image_editor = ""
 clipboard_ocr = false
+
+# LocalSend. Receiving binds a port and answers discovery, so it can be turned off entirely.
+# Transfers are never written until they are accepted through the shell.
+localsend_receive = true
+localsend_download_dir = "~/Downloads"
+# Name other devices see. Empty means use the host name.
+localsend_alias = ""
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 icon_theme = ""

@@ -622,8 +622,37 @@ per file, then each file is uploaded with its token. `prepare-upload` does not a
 accepts the transfer on the receiving device, so a send can sit waiting for a while; a timeout
 there says so rather than reporting a bare network error.
 
-Receiving is deliberately not implemented -- it means running a server, holding a certificate, and
-prompting to accept a transfer, which is the shell's job rather than a data provider's.
+### Receiving
+
+```bash
+epochoxide api localsend.status     # receiving?, alias, port, fingerprint, download directory
+epochoxide api localsend.pending    # transfers waiting on a decision
+epochoxide api localsend.accept  --params '{"session":"..."}'
+epochoxide api localsend.decline --params '{"session":"..."}'
+epochoxide api localsend.received   # files accepted since the daemon started
+```
+
+The daemon runs an HTTPS server and answers discovery, so other devices can send to this machine
+with no LocalSend app installed. It is controlled by `localsend_receive`, and files land in
+`localsend_download_dir`.
+
+**Consent.** `prepare-upload` is held open until someone accepts through the shell, or until the
+request expires after two minutes and is refused. Nothing reaches the disk before that: the file
+name and size are known from the offer, but no bytes are requested until the transfer is accepted.
+Only one transfer waits at a time; a second sender is told `Blocked by another session` rather than
+being queued behind a prompt nobody has seen.
+
+**Identity.** The certificate is generated once and kept under the data directory, because the
+fingerprint a device announces *is* its identity in LocalSend and peers pin it -- regenerating per
+run would look like a new device every time. The private key is written `0600`.
+
+**File names come from the sender**, so they are reduced to their final path component before use:
+a name like `../../.ssh/authorized_keys` lands in the download directory as `authorized_keys`. An
+existing file is never overwritten; a counter is appended instead. An upload is refused unless its
+token matches the one issued when the transfer was accepted.
+
+**Port.** 53317 by default, falling back to whatever the OS gives if something already holds it --
+the announcement carries the port actually in use, and senders honour it.
 
 ### Over the socket
 

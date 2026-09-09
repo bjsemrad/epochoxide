@@ -10,14 +10,17 @@
 //! and prompting the user to accept a transfer, which is the shell's job rather than a data
 //! provider's.
 
+mod cert;
 mod http;
+pub mod server;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The multicast group and port every LocalSend device listens on.
@@ -69,14 +72,16 @@ pub struct Sent {
 /// each time, and is deliberately not a certificate hash: nothing here accepts connections, so
 /// there is no certificate to hash.
 fn own_identity() -> Value {
+    let receiving = receiver();
     json!({
-        "alias": alias(),
+        "alias": receiving.map(|r| r.alias()).unwrap_or_else(alias),
         "version": PROTOCOL_VERSION,
         "deviceModel": "Linux",
         "deviceType": "desktop",
         "fingerprint": own_fingerprint(),
-        "port": PORT,
-        "protocol": "http",
+        "port": receiving.map(|r| r.port()).unwrap_or(PORT),
+        // Only claim HTTPS when there is actually a server holding that certificate.
+        "protocol": if receiving.is_some() { "https" } else { "http" },
         "download": false,
     })
 }
@@ -90,6 +95,12 @@ fn alias() -> String {
 }
 
 fn own_fingerprint() -> String {
+    // Once the receiver is up, the announced fingerprint has to be its certificate hash: that is
+    // what a peer pins when it sends to us. The derived value below is only a stand-in for a
+    // daemon that is not accepting transfers.
+    if let Some(receiver) = receiver() {
+        return receiver.fingerprint();
+    }
     let seed = format!("epochoxide:{}", alias());
     let digest = ring::digest::digest(&ring::digest::SHA256, seed.as_bytes());
     digest
@@ -104,7 +115,7 @@ fn own_fingerprint() -> String {
 /// Multicast has to be received on the group's own port, so the address must be shared: without
 /// SO_REUSEADDR/SO_REUSEPORT this would fail outright whenever the desktop app is open, which is
 /// exactly when a user expects discovery to work.
-fn multicast_socket() -> Result<UdpSocket> {
+pub(crate) fn multicast_socket() -> Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .context("creating the discovery socket")?;
     socket.set_reuse_address(true)?;
@@ -118,6 +129,29 @@ fn multicast_socket() -> Result<UdpSocket> {
         .context("joining the LocalSend multicast group")?;
     socket.set_read_timeout(Some(Duration::from_millis(200)))?;
     Ok(socket.into())
+}
+
+/// The running receiver, once started. Absent means this daemon is not accepting transfers.
+static RECEIVER: OnceLock<Arc<server::Receiver>> = OnceLock::new();
+
+pub fn receiver() -> Option<&'static Arc<server::Receiver>> {
+    RECEIVER.get()
+}
+
+/// Start accepting transfers. Called once as the daemon comes up; a second call is a no-op.
+pub fn start_receiver(config: &crate::config::Config) -> Result<()> {
+    if RECEIVER.get().is_some() {
+        return Ok(());
+    }
+    let name = if config.localsend_alias.is_empty() {
+        alias()
+    } else {
+        config.localsend_alias.clone()
+    };
+    let directory = PathBuf::from(shellexpand::tilde(&config.localsend_download_dir).to_string());
+    let receiver = server::start(name, directory, PORT)?;
+    let _ = RECEIVER.set(receiver);
+    Ok(())
 }
 
 /// Whether discovery can run at all here.

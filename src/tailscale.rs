@@ -258,7 +258,8 @@ fn parse_waiting_files(value: Value) -> Result<Vec<WaitingFile>> {
     if value.is_null() {
         return Ok(Vec::new());
     }
-    let files: Vec<LocalWaitingFile> = serde_json::from_value(value).context("parsing waiting files")?;
+    let files: Vec<LocalWaitingFile> =
+        serde_json::from_value(value).context("parsing waiting files")?;
     Ok(files
         .into_iter()
         .map(|file| WaitingFile {
@@ -279,7 +280,8 @@ pub fn pending_files() -> Result<Vec<WaitingFile>> {
     if !output.status.success() {
         bail!(command_error("checking waiting files", &output));
     }
-    let value: Value = serde_json::from_slice(&output.stdout).context("parsing waiting files JSON")?;
+    let value: Value =
+        serde_json::from_slice(&output.stdout).context("parsing waiting files JSON")?;
     parse_waiting_files(value)
 }
 
@@ -314,7 +316,11 @@ fn parse_receive_result(text: &str, total_hint: usize) -> ReceiveResult {
     if total == 0 && !files.is_empty() {
         total = files.len();
     }
-    ReceiveResult { moved, total, files }
+    ReceiveResult {
+        moved,
+        total,
+        files,
+    }
 }
 
 pub fn receive(directory: &str) -> Result<ReceiveResult> {
