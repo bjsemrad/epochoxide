@@ -5,7 +5,6 @@ mod config;
 mod fuzzy;
 mod history;
 mod icons;
-mod localsend;
 mod providers;
 mod server;
 mod service;
@@ -105,14 +104,6 @@ fn main() -> Result<()> {
         Command::Serve { socket } => {
             let socket = socket.unwrap_or_else(|| config.socket.clone());
             let config_path = Config::resolved_path(cli.config.as_deref());
-            // Accepting transfers means binding a port and answering discovery, so a failure here
-            // is reported and stepped over rather than stopping the daemon: everything else still
-            // works without it.
-            if config.localsend_receive {
-                if let Err(err) = localsend::start_receiver(&config) {
-                    eprintln!("localsend: not accepting transfers: {err:#}");
-                }
-            }
             server::serve(&socket, config_path, move || Registry::new(config.clone()))
         }
         Command::Query {
