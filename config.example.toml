@@ -26,6 +26,10 @@ screenshot_copy = true
 screenshot_save = true
 screenshot_notify = true
 
+# Language `epochctl capture ocr` reads with. Join several with "+" (e.g. "eng+deu") as long as
+# the tesseract data files for them are installed.
+ocr_language = "eng"
+
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 icon_theme = ""

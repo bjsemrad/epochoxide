@@ -54,6 +54,9 @@ pub struct Config {
     pub screenshot_save: bool,
     /// Announce each screenshot to the session's notification server, which is the shell.
     pub screenshot_notify: bool,
+    /// Tesseract language `capture.ocr` reads with. Several can be joined with `+`, e.g.
+    /// `eng+deu`, as long as the data files for them are installed.
+    pub ocr_language: String,
     pub clipboard_capture_interval_ms: u64,
     pub runner_scan_path: bool,
     pub runner_commands: Vec<RunnerCommand>,
@@ -97,6 +100,7 @@ struct PartialConfig {
     screenshot_copy: Option<bool>,
     screenshot_save: Option<bool>,
     screenshot_notify: Option<bool>,
+    ocr_language: Option<String>,
     clipboard_capture_interval_ms: Option<u64>,
     runner_scan_path: Option<bool>,
     runner_commands: Option<Vec<RunnerCommand>>,
@@ -138,6 +142,7 @@ impl Default for Config {
             screenshot_copy: true,
             screenshot_save: true,
             screenshot_notify: true,
+            ocr_language: "eng".into(),
             clipboard_capture_interval_ms: 250,
             runner_scan_path: true,
             runner_commands: Vec::new(),
@@ -230,6 +235,9 @@ impl Config {
         }
         if let Some(v) = partial.screenshot_notify {
             cfg.screenshot_notify = v;
+        }
+        if let Some(v) = partial.ocr_language {
+            cfg.ocr_language = v;
         }
         if let Some(v) = partial.clipboard_capture_interval_ms {
             cfg.clipboard_capture_interval_ms = v;

@@ -20,6 +20,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - Nix flake package, Home Manager module, and NixOS module.
 - JSON-over-Unix-socket protocol for easy shell integration.
 - Screenshots -- region, window, monitor, or the whole layout -- saved, copied, and announced.
+- OCR capture: read the text out of part of the screen and put it on the clipboard.
 - Versioned Epoch API for normalized compositor state and Tailscale, independent of the launcher.
 
 ## Why
@@ -309,6 +310,7 @@ screenshot_filename = "screenshot-%Y%m%d-%H%M%S.png"
 screenshot_copy = true
 screenshot_save = true
 screenshot_notify = true
+ocr_language = "eng"
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 
@@ -497,7 +499,7 @@ epochoxide api api.describe
 contract version: 1.0
   compositor   available    7 methods
   tailscale    available    3 methods
-  capture      available    2 methods
+  capture      available    3 methods
   localsend    available    9 methods
   dev          planned      0 methods   not implemented in this build
   nix          planned      0 methods   not implemented in this build
@@ -619,6 +621,39 @@ capturing the wrong rectangle.
 
 `capture.status` answers even when the group is unavailable: it is how a caller finds out that
 grim is not installed, so it would be useless if a missing grim silenced it.
+
+```bash
+epochoxide api capture.ocr                                          # read a region
+epochoxide api capture.ocr --params '{"mode":"window"}'
+epochoxide api capture.ocr --params '{"language":"eng+deu"}'
+epochoxide api capture.ocr --params '{"save":true}'                 # keep the image too
+```
+
+```json
+{
+  "cancelled": false,
+  "mode": "region",
+  "text": "the text that was on screen",
+  "characters": 27,
+  "lines": 1,
+  "copied": true,
+  "notified": true,
+  "language": "eng",
+  "geometry": "980,420 640x180",
+  "path": null,
+  "saved": false
+}
+```
+
+`ocr` captures the same way `screenshot` does and hands the frame to `tesseract`, then copies the
+text rather than the picture. The image is a means to an end, so it is not kept unless `save` asks:
+what the user wanted is on the clipboard, and a screenshots folder filling up with pictures of text
+is not a feature. `ocr_language` sets the default language, and several can be joined with `+` as
+long as the data files are installed.
+
+Text that comes back empty is a result, not a failure -- a region with nothing legible in it is a
+thing that happens -- so it answers `ok` with `characters: 0`, and the notification says "No text
+found" rather than claiming a copy that did not happen.
 
 ### Tailscale
 
@@ -889,7 +924,7 @@ Some providers call common desktop tools when available:
 - `wl-clipboard` for clipboard text/image capture, and for putting screenshots on the clipboard.
 - `grim` and `slurp` for screenshots and region selection.
 - `libnotify` for `notify-send`, which announces a finished capture.
-- `tesseract` for OCR.
+- `tesseract` for OCR, both on clipboard images and on `capture.ocr`.
 - `xdg-utils` for opening files/apps.
 - `wmctrl` for X11 window focus.
 - `hyprctl`, `swaymsg`, or `niri` for compositor windows.

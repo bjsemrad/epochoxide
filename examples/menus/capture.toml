@@ -55,6 +55,15 @@ value = "region --delay 3"
 keywords = ["screenshot", "delay", "timer", "menu"]
 
 [[entries]]
+text = "Text from region"
+subtext = "Read it with OCR and copy the text"
+value = "region"
+keywords = ["ocr", "text", "copy", "read", "scan"]
+
+[entries.actions]
+default = "epochctl capture ocr %VALUE%"
+
+[[entries]]
 text = "Screenshots folder"
 subtext = "Open where shots are saved"
 value = "~/Pictures/Screenshots"

@@ -234,6 +234,28 @@ const CAPTURE: &[Method] = &[
         ],
     ),
     method(
+        "ocr",
+        "Capture a region and copy the text read out of it",
+        &[
+            (
+                "mode",
+                "optional string: region (default), window, fullscreen, or all",
+            ),
+            (
+                "language",
+                "optional tesseract language, defaulting to ocr_language; join several with +",
+            ),
+            ("select", "optional bool; click the window instead of taking the focused one"),
+            ("delay", "optional number of seconds to wait before capturing"),
+            ("copy", "optional bool, defaulting to screenshot_copy"),
+            (
+                "save",
+                "optional bool; keep the captured image too, off by default",
+            ),
+            ("notify", "optional bool, defaulting to screenshot_notify"),
+        ],
+    ),
+    method(
         "status",
         "Where screenshots land, which capture tools are installed, and what this compositor supports",
         &[],
@@ -534,6 +556,46 @@ fn param_strings(params: &Value, key: &str) -> Result<Vec<String>, ApiError> {
         .collect()
 }
 
+/// Read the parameters `capture.screenshot` and `capture.ocr` share.
+///
+/// The two differ only in what they do with the frame afterwards, so what to point the camera at
+/// is read once here rather than drifting apart in two places.
+fn capture_request(params: &Value) -> Result<capture::Request, ApiError> {
+    let mode = match params.get("mode").and_then(Value::as_str) {
+        Some(mode) if !mode.is_empty() => capture::Mode::parse(mode)
+            .map_err(|err| ApiError::new(ErrorCode::InvalidParams, err.to_string()))?,
+        _ => capture::Mode::default(),
+    };
+    // A negative delay is a sign the caller meant something else; it cannot be honoured either
+    // way, and Duration::from_secs_f64 panics on one.
+    let delay = param_number(params, "delay")?.unwrap_or(0.0);
+    if delay < 0.0 || !delay.is_finite() {
+        return Err(ApiError::new(
+            ErrorCode::InvalidParams,
+            format!("\"delay\" must be a number of seconds, not {delay}"),
+        ));
+    }
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    Ok(capture::Request {
+        mode,
+        output: text("output"),
+        select: param_bool(params, "select").unwrap_or(false),
+        cursor: param_bool(params, "cursor").unwrap_or(false),
+        delay: std::time::Duration::from_secs_f64(delay),
+        copy: param_bool(params, "copy"),
+        save: param_bool(params, "save"),
+        notify: param_bool(params, "notify"),
+        directory: optional_path(params, "directory"),
+        language: text("language"),
+    })
+}
+
 fn value<T: Serialize>(data: T) -> Result<Value, ApiError> {
     serde_json::to_value(data)
         .map_err(|err| ApiError::new(ErrorCode::BackendError, err.to_string()))
@@ -635,28 +697,10 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
         }
         ("capture", "status") => value(capture::status()),
         ("capture", "screenshot") => {
-            let mode = match params.get("mode").and_then(Value::as_str) {
-                Some(mode) if !mode.is_empty() => capture::Mode::parse(mode)
-                    .map_err(|err| ApiError::new(ErrorCode::InvalidParams, err.to_string()))?,
-                _ => capture::Mode::default(),
-            };
-            let delay = param_number(params, "delay")?.unwrap_or(0.0).max(0.0);
-            let request = capture::Request {
-                mode,
-                output: params
-                    .get("output")
-                    .and_then(Value::as_str)
-                    .filter(|output| !output.is_empty())
-                    .map(str::to_string),
-                select: param_bool(params, "select").unwrap_or(false),
-                cursor: param_bool(params, "cursor").unwrap_or(false),
-                delay: std::time::Duration::from_secs_f64(delay),
-                copy: param_bool(params, "copy"),
-                save: param_bool(params, "save"),
-                notify: param_bool(params, "notify"),
-                directory: optional_path(params, "directory"),
-            };
-            value(capture::screenshot(&request).map_err(backend_error)?)
+            value(capture::screenshot(&capture_request(params)?).map_err(backend_error)?)
+        }
+        ("capture", "ocr") => {
+            value(capture::ocr(&capture_request(params)?).map_err(backend_error)?)
         }
         ("localsend", "devices") => value(localsend::devices().map_err(backend_error)?),
         ("localsend", "status") => Ok(match localsend::receiver() {

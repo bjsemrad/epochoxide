@@ -78,6 +78,8 @@
         screenshot_copy = true;
         screenshot_save = true;
         screenshot_notify = true;
+        # Language capture.ocr reads with; join several with "+" (e.g. "eng+deu").
+        ocr_language = "eng";
         clipboard_capture_interval_ms = 250;
         runner_scan_path = true;
         runner_commands = [ ];

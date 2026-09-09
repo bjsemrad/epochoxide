@@ -1,8 +1,9 @@
 //! Screen capture.
 //!
-//! Screenshots are taken with `grim`, regions are chosen with `slurp`, the result is put on the
-//! clipboard with `wl-copy`, and the user is told about it with `notify-send` -- which the shell
-//! itself answers, since EpochShell is the session's notification server.
+//! Screenshots are taken with `grim`, regions are chosen with `slurp`, text is read out of them
+//! with `tesseract`, the result is put on the clipboard with `wl-copy`, and the user is told about
+//! it with `notify-send` -- which the shell itself answers, since EpochShell is the session's
+//! notification server.
 //!
 //! Three things are deliberately kept out of here:
 //!
@@ -80,6 +81,8 @@ pub struct Request {
     pub notify: Option<bool>,
     /// Where to save, overriding `screenshot_dir`.
     pub directory: Option<PathBuf>,
+    /// Tesseract language for `ocr`, overriding `ocr_language`.
+    pub language: Option<String>,
 }
 
 /// What a capture produced. A cancelled selection is a result, not an error: pressing Escape is
@@ -123,6 +126,42 @@ impl Shot {
     }
 }
 
+/// What an OCR pass read. Empty text is a result, not a failure: a region with nothing legible in
+/// it is a thing that happens, and it is worth saying so rather than raising an error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Text {
+    pub cancelled: bool,
+    pub mode: String,
+    pub text: String,
+    pub characters: usize,
+    pub lines: usize,
+    pub copied: bool,
+    pub notified: bool,
+    pub language: String,
+    pub geometry: Option<String>,
+    /// The image the text was read from, kept only when the request asked to save it.
+    pub path: Option<String>,
+    pub saved: bool,
+}
+
+impl Text {
+    fn cancelled(mode: Mode, language: &str) -> Self {
+        Self {
+            cancelled: true,
+            mode: mode.as_str().to_string(),
+            text: String::new(),
+            characters: 0,
+            lines: 0,
+            copied: false,
+            notified: false,
+            language: language.to_string(),
+            geometry: None,
+            path: None,
+            saved: false,
+        }
+    }
+}
+
 /// One external tool capture needs, and what stops working without it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tool {
@@ -145,6 +184,9 @@ pub struct Status {
     /// False when the running compositor does not report window geometry, which is what
     /// `mode: "window"` needs.
     pub window_capture: bool,
+    /// False when tesseract is not installed, which is what `capture.ocr` needs.
+    pub ocr: bool,
+    pub ocr_language: String,
     pub compositor: Option<String>,
 }
 
@@ -152,6 +194,7 @@ const GRIM: &str = "grim";
 const SLURP: &str = "slurp";
 const WL_COPY: &str = "wl-copy";
 const NOTIFY_SEND: &str = "notify-send";
+const TESSERACT: &str = "tesseract";
 
 /// How many copy-only screenshots to keep in the scratch directory.
 ///
@@ -167,6 +210,7 @@ struct Settings {
     copy: bool,
     save: bool,
     notify: bool,
+    ocr_language: String,
 }
 
 impl Default for Settings {
@@ -178,6 +222,7 @@ impl Default for Settings {
             copy: config.screenshot_copy,
             save: config.screenshot_save,
             notify: config.screenshot_notify,
+            ocr_language: config.ocr_language,
         }
     }
 }
@@ -191,6 +236,7 @@ pub fn configure(config: &Config) {
         copy: config.screenshot_copy,
         save: config.screenshot_save,
         notify: config.screenshot_notify,
+        ocr_language: config.ocr_language.clone(),
     });
 }
 
@@ -224,19 +270,34 @@ pub fn status() -> Status {
             tool(SLURP, "region and window selection", false),
             tool(WL_COPY, "copying shots to the clipboard", false),
             tool(NOTIFY_SEND, "capture notifications", false),
+            tool(TESSERACT, "reading text out of a capture", false),
         ],
         window_capture: regions.is_some(),
+        ocr: which(TESSERACT).is_some(),
+        ocr_language: settings.ocr_language,
         compositor: compositor::active().map(|backend| backend.name().to_string()),
     }
 }
 
-/// Take a screenshot, then copy it, save it, and announce it as the request asks.
-pub fn screenshot(request: &Request) -> Result<Shot> {
-    let settings = settings();
-    let copy = request.copy.unwrap_or(settings.copy);
-    let save = request.save.unwrap_or(settings.save);
-    let notify = request.notify.unwrap_or(settings.notify);
+/// A captured frame, sitting in a file, before anything has been decided about what to do with it.
+struct Frame {
+    path: PathBuf,
+    geometry: Option<String>,
+    output: Option<String>,
+    window: Option<String>,
+    width: u32,
+    height: u32,
+    bytes: u64,
+}
 
+/// Ask what to capture, capture it, and leave it in a file.
+///
+/// `Ok(None)` is a cancelled selection rather than a failure. `save` decides where the file lands:
+/// a kept capture goes to the screenshot directory under its configured name, and everything else
+/// to the pruned scratch directory, because even a capture nobody wants to keep has to exist as a
+/// file for the clipboard, for tesseract, and for the notification's thumbnail.
+fn capture(request: &Request, save: bool) -> Result<Option<Frame>> {
+    let settings = settings();
     require(GRIM)?;
 
     // Selection happens before the delay so the delay is a chance to arrange what is on screen,
@@ -246,14 +307,14 @@ pub fn screenshot(request: &Request) -> Result<Shot> {
     let geometry = match request.mode {
         Mode::Region => match select_region()? {
             Some(geometry) => Some(geometry),
-            None => return Ok(Shot::cancelled(request.mode)),
+            None => return Ok(None),
         },
         Mode::Window => match window_region(request.select)? {
             Some(region) => {
                 window = Some(region.title.clone());
                 Some(region.geometry())
             }
-            None => return Ok(Shot::cancelled(request.mode)),
+            None => return Ok(None),
         },
         Mode::Fullscreen => {
             // Falling back to the whole layout is better than refusing: a single-monitor session
@@ -293,11 +354,32 @@ pub fn screenshot(request: &Request) -> Result<Shot> {
         .map(|meta| meta.len())
         .unwrap_or(0);
     let (width, height) = png_size(&destination).unwrap_or((0, 0));
+    Ok(Some(Frame {
+        path: destination,
+        geometry,
+        output,
+        window,
+        width,
+        height,
+        bytes,
+    }))
+}
+
+/// Take a screenshot, then copy it, save it, and announce it as the request asks.
+pub fn screenshot(request: &Request) -> Result<Shot> {
+    let settings = settings();
+    let copy = request.copy.unwrap_or(settings.copy);
+    let save = request.save.unwrap_or(settings.save);
+    let notify = request.notify.unwrap_or(settings.notify);
+
+    let Some(frame) = capture(request, save)? else {
+        return Ok(Shot::cancelled(request.mode));
+    };
 
     // A copy that fails is worth reporting rather than swallowing: the user asked for the shot to
     // be on the clipboard, and a silent "it worked" would send them pasting into nothing.
     let copied = if copy {
-        copy_image(&destination).context("copying the screenshot to the clipboard")?;
+        copy_image(&frame.path).context("copying the screenshot to the clipboard")?;
         true
     } else {
         false
@@ -306,20 +388,75 @@ pub fn screenshot(request: &Request) -> Result<Shot> {
     let shot = Shot {
         cancelled: false,
         mode: request.mode.as_str().to_string(),
-        path: Some(destination.display().to_string()),
+        path: Some(frame.path.display().to_string()),
         saved: save,
         copied,
         // A missing notify-send is not a failed screenshot, so the notification is best-effort and
         // the result says whether it actually went out.
-        notified: notify && announce(&destination, save, copied, width, height).is_ok(),
-        geometry,
-        output,
-        window,
-        width,
-        height,
-        bytes,
+        notified: notify && announce_shot(&frame, save, copied).is_ok(),
+        geometry: frame.geometry,
+        output: frame.output,
+        window: frame.window,
+        width: frame.width,
+        height: frame.height,
+        bytes: frame.bytes,
     };
     Ok(shot)
+}
+
+/// Capture a region and read the text out of it.
+///
+/// The image is a means to an end here, so it is not kept unless the request asks: what the user
+/// wanted is on the clipboard, and a screenshots folder filling up with pictures of text nobody
+/// will look at again is not a feature.
+pub fn ocr(request: &Request) -> Result<Text> {
+    let settings = settings();
+    let copy = request.copy.unwrap_or(settings.copy);
+    let save = request.save.unwrap_or(false);
+    let notify = request.notify.unwrap_or(settings.notify);
+    let language = match &request.language {
+        Some(language) => language.clone(),
+        None => settings.ocr_language.clone(),
+    };
+    validate_language(&language)?;
+
+    if which(TESSERACT).is_none() {
+        bail!("{TESSERACT} is not installed, so there is nothing to read text with");
+    }
+
+    let Some(frame) = capture(request, save)? else {
+        return Ok(Text::cancelled(request.mode, &language));
+    };
+
+    let text = read_text(&frame.path, &language)?;
+    let copied = if copy && !text.is_empty() {
+        copy_text(&text).context("copying the text to the clipboard")?;
+        true
+    } else {
+        false
+    };
+
+    Ok(Text {
+        cancelled: false,
+        mode: request.mode.as_str().to_string(),
+        characters: text.chars().count(),
+        lines: if text.is_empty() {
+            0
+        } else {
+            text.lines().count()
+        },
+        notified: notify && announce_text(&frame, &text, copied).is_ok(),
+        copied,
+        language,
+        geometry: frame.geometry,
+        path: if save {
+            Some(frame.path.display().to_string())
+        } else {
+            None
+        },
+        saved: save,
+        text,
+    })
 }
 
 // --- Capture -----------------------------------------------------------------
@@ -474,9 +611,15 @@ fn copy_image(path: &Path) -> Result<()> {
         Some("ppm") => "image/x-portable-pixmap",
         _ => "image/png",
     };
+    // wl-copy forks a background process to hold the selection until something replaces it, and
+    // that process inherits whatever stdout it was given. Left inherited, it holds a pipe open
+    // long after this command has finished -- `epochctl capture ocr | wc -l` would sit there
+    // until the next copy. Handing it nothing costs nothing: it has nothing to say.
     let mut child = Command::new(WL_COPY)
         .args(["--type", mime])
         .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("running {WL_COPY}"))?;
     child
@@ -494,10 +637,68 @@ fn copy_image(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read the text out of an image.
+///
+/// tesseract writes its own progress and warnings to stderr and still exits 0, so only a non-zero
+/// exit is a failure; an empty answer means the region had nothing legible in it.
+fn read_text(path: &Path, language: &str) -> Result<String> {
+    let out = Command::new(TESSERACT)
+        .arg(path)
+        .arg("stdout")
+        .args(["-l", language])
+        .output()
+        .with_context(|| format!("running {TESSERACT}"))?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let detail = if detail.is_empty() {
+            format!("exited with {}", out.status)
+        } else {
+            detail
+        };
+        bail!("{TESSERACT} failed: {detail}");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// tesseract takes `eng`, or several joined with `+`. Anything else is a typo worth naming now
+/// rather than a confusing tesseract error after the user has already chosen a region.
+fn validate_language(language: &str) -> Result<()> {
+    let valid = !language.is_empty()
+        && language
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '_' || c == '-');
+    if valid {
+        Ok(())
+    } else {
+        bail!("\"{language}\" is not a tesseract language (try eng, or eng+deu)")
+    }
+}
+
+fn copy_text(text: &str) -> Result<()> {
+    require(WL_COPY)?;
+    // See copy_image: the selection owner must not keep this process's stdout open.
+    let mut child = Command::new(WL_COPY)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("running {WL_COPY}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| anyhow!("clipboard stdin unavailable"))?
+        .write_all(text.as_bytes())?;
+    drop(child.stdin.take());
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("{WL_COPY} exited with {status}");
+    }
+    Ok(())
+}
+
 /// Tell the session a shot was taken. The image path goes along as a hint so the shell can show
 /// the shot itself rather than a generic camera icon.
-fn announce(path: &Path, saved: bool, copied: bool, width: u32, height: u32) -> Result<()> {
-    require(NOTIFY_SEND)?;
+fn announce_shot(frame: &Frame, saved: bool, copied: bool) -> Result<()> {
     let summary = match (saved, copied) {
         (true, true) => "Screenshot saved and copied",
         (true, false) => "Screenshot saved",
@@ -505,23 +706,75 @@ fn announce(path: &Path, saved: bool, copied: bool, width: u32, height: u32) -> 
         (false, false) => "Screenshot taken",
     };
     let mut body = if saved {
-        path.file_name()
+        frame
+            .path
+            .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default()
     } else {
         String::new()
     };
-    if width > 0 && height > 0 {
+    if frame.width > 0 && frame.height > 0 {
         if !body.is_empty() {
             body.push_str(" · ");
         }
-        body.push_str(&format!("{width}×{height}"));
+        body.push_str(&format!("{}×{}", frame.width, frame.height));
     }
-    let status = Command::new(NOTIFY_SEND)
+    announce(summary, &body, Some(&frame.path))
+}
+
+/// Tell the session what was read. The text itself is the body, trimmed to a few lines: the point
+/// is to confirm the right thing was captured, and the whole of it is on the clipboard anyway.
+fn announce_text(frame: &Frame, text: &str, copied: bool) -> Result<()> {
+    if text.is_empty() {
+        return announce(
+            "No text found",
+            "Nothing legible in that region",
+            Some(&frame.path),
+        );
+    }
+    let summary = if copied {
+        "Text copied"
+    } else {
+        "Text captured"
+    };
+    announce(summary, &preview(text, 3, 160), Some(&frame.path))
+}
+
+/// The first few lines of `text`, ellipsised, for a notification body.
+fn preview(text: &str, lines: usize, characters: usize) -> String {
+    let mut out = String::new();
+    let mut taken = 0;
+    for line in text.lines().take(lines) {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+        taken += 1;
+    }
+    let more = text.lines().count() > taken;
+    if out.chars().count() > characters {
+        out = out.chars().take(characters).collect();
+        return format!("{}…", out.trim_end());
+    }
+    if more {
+        out.push('…');
+    }
+    out
+}
+
+/// Send one notification, best-effort. `image` becomes the thumbnail the shell draws.
+fn announce(summary: &str, body: &str, image: Option<&Path>) -> Result<()> {
+    require(NOTIFY_SEND)?;
+    let mut command = Command::new(NOTIFY_SEND);
+    command
         .arg("--app-name=EpochShell")
-        .arg("--icon=camera-photo")
-        .arg(format!("--hint=string:image-path:{}", path.display()))
-        // Successive shots replace each other in the toast stack instead of stacking up.
+        .arg("--icon=camera-photo");
+    if let Some(image) = image {
+        command.arg(format!("--hint=string:image-path:{}", image.display()));
+    }
+    // Successive captures replace each other in the toast stack instead of stacking up.
+    let status = command
         .arg("--hint=string:x-canonical-private-synchronous:epoch-screenshot")
         .arg(summary)
         .arg(body)
@@ -782,6 +1035,31 @@ mod tests {
         let path = directory.path().join("shot.png");
         std::fs::write(&path, b"not an image at all, but long enough to read").expect("write");
         assert_eq!(png_size(&path), None);
+    }
+
+    #[test]
+    fn a_language_is_a_tesseract_language_or_a_typo() {
+        assert!(validate_language("eng").is_ok());
+        assert!(validate_language("eng+deu").is_ok());
+        assert!(validate_language("chi_sim").is_ok());
+        assert!(validate_language("").is_err());
+        assert!(validate_language("eng deu").is_err());
+        assert!(validate_language("../eng").is_err());
+    }
+
+    #[test]
+    fn a_notification_body_shows_the_first_lines_and_says_there_are_more() {
+        assert_eq!(preview("one\ntwo", 3, 160), "one\ntwo");
+        assert_eq!(preview("one\ntwo\nthree\nfour", 3, 160), "one\ntwo\nthree…");
+        assert_eq!(preview("", 3, 160), "");
+    }
+
+    #[test]
+    fn a_long_first_line_is_cut_rather_than_filling_the_toast() {
+        let long = "x".repeat(400);
+        let shown = preview(&long, 3, 20);
+        assert_eq!(shown.chars().count(), 21, "20 characters and an ellipsis");
+        assert!(shown.ends_with('…'));
     }
 
     #[test]
