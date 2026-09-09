@@ -22,6 +22,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - Screenshots -- region, window, monitor, or the whole layout -- saved, copied, and announced.
 - OCR capture: read the text out of part of the screen and put it on the clipboard.
 - Screen recording of a region, a window, or a monitor, with the daemon owning the recorder.
+- Nix flake update awareness: what could move, checked without writing to your flake.
 - Versioned Epoch API for normalized compositor state and Tailscale, independent of the launcher.
 
 ## Why
@@ -316,6 +317,9 @@ recording_dir = "~/Videos/Recordings"
 recording_filename = "recording-%Y%m%d-%H%M%S.mp4"
 recording_notify = true
 recording_framerate = 30
+nix_flake = "~/nixconfig"
+nix_check_interval_minutes = 60
+nix_update_command = "nix flake update"
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 
@@ -507,7 +511,7 @@ contract version: 1.0
   capture      available    6 methods
   localsend    available    9 methods
   dev          planned      0 methods   not implemented in this build
-  nix          planned      0 methods   not implemented in this build
+  nix          available    5 methods
   system       planned      0 methods   not implemented in this build
 ```
 
@@ -727,6 +731,70 @@ One deliberate divergence from what Tailscale reports: for *this* device, `onlin
 backend state rather than `Self.Online`, which Tailscale sets false whenever it cannot reach the
 coordination server — even with the tailnet up. Showing the local machine as offline next to a
 status of `Running` would be a contradiction, so the normalization resolves it.
+
+### Nix
+
+```bash
+epochoxide api nix.status     # what the last check found; answers from memory
+epochoxide api nix.check      # resolve every input now
+epochoxide api nix.hosts
+epochoxide api nix.update
+epochoxide api nix.rebuild --params '{"host":"thor"}'
+```
+
+```json
+{
+  "flake": "/home/you/nixconfig",
+  "available": true,
+  "locked_at": 1788921488,
+  "checked_at": 1788972912,
+  "checking": false,
+  "updates": 1,
+  "inputs": [
+    {
+      "name": "nixpkgs",
+      "kind": "github",
+      "source": "github:NixOS/nixpkgs/nixos-unstable",
+      "current_rev": "6aefcda940c5cbc9bce364fef6cd8fbb32e1e0d3",
+      "current_date": 1788921488,
+      "latest_rev": "d6524aaca2ff07876657ae2b323f24be4874944b",
+      "latest_date": 1788881743,
+      "update_available": true
+    }
+  ],
+  "hosts": [{ "name": "thor", "rebuild": "rebuild-thor", "configured": true }]
+}
+```
+
+**Checking never writes to your flake.** `nix flake update --output-lock-file` resolves every input
+to what it would lock to today and writes that candidate lock to a temp file, which is deleted once
+it has been read; `flake.lock` is left exactly as it was. The alternative -- copying the flake
+somewhere and updating the copy -- is worse: the copy goes stale, and a `path:` input inside it
+stops resolving.
+
+Only the root flake's own inputs are compared. Those are what a person updates; a transitive input
+moving on its own is invisible to `nix flake update` at this level too, and an input written as a
+`follows` has no revision of its own to compare.
+
+`status` answers from memory and is cheap enough to poll; `check` costs a network round trip per
+input, so a timer in the daemon does it every `nix_check_interval_minutes` and the shell reads the
+result. A notification goes out only when an input gains an update it did not have at the previous
+check -- saying "23 updates available" every hour is how a notifier teaches people to ignore it.
+
+Every host in a flake shares one `flake.lock`, so "which hosts have updates" has the same answer for
+all of them. What differs per host is the command that rebuilds it, which is why `nix_hosts` pairs
+each name with its own command:
+
+```toml
+[[nix_hosts]]
+name = "thor"
+rebuild = "rebuild-thor"
+```
+
+A rebuild is usually an alias or a script that already knows its target, so the command is stored
+per host rather than derived from one template. Hosts read out of the flake's `nixosConfigurations`
+that config did not name fall back to `nix_rebuild_command` with `%HOST%` substituted, and are
+offered no action at all when that is empty. Nothing here has a default that changes a system.
 
 ### LocalSend
 
@@ -975,6 +1043,7 @@ Some providers call common desktop tools when available:
 - `wl-clipboard` for clipboard text/image capture, and for putting screenshots on the clipboard.
 - `grim` and `slurp` for screenshots and region selection.
 - `wf-recorder` for screen recording.
+- `nix` for flake update checking, and a terminal for the update and rebuild actions.
 - `libnotify` for `notify-send`, which announces a finished capture.
 - `tesseract` for OCR, both on clipboard images and on `capture.ocr`.
 - `xdg-utils` for opening files/apps.

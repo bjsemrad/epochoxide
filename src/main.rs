@@ -7,6 +7,8 @@ mod fuzzy;
 mod history;
 mod icons;
 mod localsend;
+mod nix;
+mod notify;
 mod providers;
 mod server;
 mod service;
@@ -104,6 +106,7 @@ fn main() -> Result<()> {
     // Capture settings are read by both the daemon and the one-shot `api` command, which answers
     // in-process when no daemon is running, so they are installed before either path runs.
     capture::configure(&config);
+    nix::configure(&config);
 
     match cli.command {
         Command::Serve { socket } => {
@@ -113,6 +116,9 @@ fn main() -> Result<()> {
             // is reported and stepped over rather than stopping the daemon: everything else still
             // works without it.
             localsend::configure(&config);
+            // Checking for flake updates is a background job with a timer, so it only runs under
+            // the daemon; the one-shot CLI answers from whatever the daemon last found.
+            nix::watch();
             if config.localsend_receive {
                 if let Err(err) = localsend::start_receiver() {
                     eprintln!("localsend: not accepting transfers: {err:#}");

@@ -18,7 +18,7 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{capture, compositor, localsend, tailscale};
+use crate::{capture, compositor, localsend, nix, tailscale};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -344,6 +344,37 @@ const LOCALSEND: &[Method] = &[
     ),
 ];
 
+const NIX: &[Method] = &[
+    method(
+        "status",
+        "Flake update state, from the last check; answers from memory",
+        &[],
+    ),
+    method(
+        "check",
+        "Resolve every flake input and report what could be updated",
+        &[],
+    ),
+    method(
+        "update",
+        "Run the configured update command in a terminal",
+        &[],
+    ),
+    method(
+        "rebuild",
+        "Run the configured rebuild command in a terminal",
+        &[(
+            "host",
+            "optional string, a name from nix.hosts; replaces %HOST% in nix_rebuild_command",
+        )],
+    ),
+    method(
+        "hosts",
+        "The hosts this flake defines, for the rebuild action",
+        &[],
+    ),
+];
+
 const GROUPS: &[Group] = &[
     Group {
         name: "compositor",
@@ -375,7 +406,7 @@ const GROUPS: &[Group] = &[
     Group {
         name: "nix",
         summary: "Flake update status and rebuilds",
-        methods: &[],
+        methods: NIX,
     },
     Group {
         name: "system",
@@ -391,7 +422,7 @@ const GROUPS: &[Group] = &[
 /// installed would leave nobody able to ask. `capture.recording` is the same kind of question: the
 /// shell polls it to draw its indicator, and "is anything recording" has an answer on a machine
 /// with no grim.
-const ALWAYS_ANSWERS: &[&str] = &["capture.status", "capture.recording"];
+const ALWAYS_ANSWERS: &[&str] = &["capture.status", "capture.recording", "nix.status"];
 
 /// A group's availability is decided at call time, not at startup: a compositor can be restarted
 /// and Tailscale can be installed without EpochOxide being restarted.
@@ -408,6 +439,10 @@ fn availability(group: &str) -> Availability {
                 Availability::Unavailable("the tailscale CLI is not installed".into())
             }
         }
+        "nix" => match nix::available() {
+            Ok(()) => Availability::Available,
+            Err(reason) => Availability::Unavailable(reason),
+        },
         "capture" => match capture::available() {
             Ok(()) => Availability::Available,
             Err(reason) => Availability::Unavailable(reason),
@@ -744,6 +779,18 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
             value(capture::stop_recording(param_bool(params, "notify")).map_err(backend_error)?)
         }
         ("capture", "recording") => value(capture::recording().map_err(backend_error)?),
+        ("nix", "status") => value(nix::status()),
+        ("nix", "check") => value(nix::check().map_err(backend_error)?),
+        ("nix", "update") => {
+            let command = nix::update().map_err(backend_error)?;
+            Ok(json!({ "started": true, "command": command }))
+        }
+        ("nix", "rebuild") => {
+            let host = params.get("host").and_then(Value::as_str);
+            let command = nix::rebuild(host).map_err(backend_error)?;
+            Ok(json!({ "started": true, "command": command }))
+        }
+        ("nix", "hosts") => value(nix::hosts().map_err(backend_error)?),
         ("localsend", "devices") => value(localsend::devices().map_err(backend_error)?),
         ("localsend", "status") => Ok(match localsend::receiver() {
             Some(receiver) => json!({

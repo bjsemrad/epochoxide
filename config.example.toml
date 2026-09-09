@@ -41,6 +41,27 @@ recording_notify = true
 # Zero hands the timing back to wf-recorder.
 recording_framerate = 30
 
+# Nix flake update awareness. Checking never writes to your flake: it resolves the inputs into a
+# throwaway lock file and compares, so flake.lock is left exactly as it is. Empty nix_flake turns
+# the whole feature off.
+nix_flake = ""
+nix_check_interval_minutes = 60
+nix_update_command = "nix flake update"
+nix_notify = true
+
+# What rebuilds a host. Leave nix_rebuild_command empty and give each host its own command below
+# when you have aliases that already know their target; %HOST% is substituted into
+# nix_rebuild_command for hosts read out of the flake.
+nix_rebuild_command = ""
+
+# [[nix_hosts]]
+# name = "thor"
+# rebuild = "rebuild-thor"
+#
+# [[nix_hosts]]
+# name = "odin"
+# rebuild = "deploy odin"
+
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 icon_theme = ""

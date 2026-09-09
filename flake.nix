@@ -85,6 +85,15 @@
         recording_notify = true;
         # A constant framerate keeps the file playable; see config.example.toml.
         recording_framerate = 30;
+        # Nix flake update awareness. Checking never writes to the flake; see config.example.toml.
+        # An empty nix_flake turns it off, which is the default: where someone keeps their config
+        # is not something to guess at.
+        nix_flake = "";
+        nix_check_interval_minutes = 60;
+        nix_update_command = "nix flake update";
+        nix_rebuild_command = "";
+        nix_hosts = [ ];
+        nix_notify = true;
         clipboard_capture_interval_ms = 250;
         runner_scan_path = true;
         runner_commands = [ ];

@@ -64,6 +64,21 @@ pub struct Config {
     pub recording_filename: String,
     /// Announce a finished recording to the session's notification server.
     pub recording_notify: bool,
+    /// The flake `capture`-adjacent Nix awareness watches, e.g. `~/nixconfig`. Empty turns the
+    /// whole feature off; nothing is ever written to it.
+    pub nix_flake: String,
+    /// Minutes between automatic update checks. Zero turns the timer off, leaving `nix.check`.
+    pub nix_check_interval_minutes: u64,
+    /// What `nix.update` runs in a terminal, from the flake's directory.
+    pub nix_update_command: String,
+    /// What `nix.rebuild` runs. Empty by default: guessing a rebuild command means running the
+    /// wrong one on someone's machine. `%HOST%` is replaced with the host being rebuilt.
+    pub nix_rebuild_command: String,
+    /// Hosts to offer a rebuild for, each with the command that rebuilds it. Empty reads the
+    /// names from the flake's `nixosConfigurations` and falls back to `nix_rebuild_command`.
+    pub nix_hosts: Vec<NixHost>,
+    /// Notify when an input gains an update it did not have at the previous check.
+    pub nix_notify: bool,
     /// Frames per second to record at. A constant rate is what keeps the file playable: left to
     /// pick its own timing, wf-recorder writes a stream declaring 90000fps, and x264 derives an
     /// H.264 level from that which players refuse to decode -- the video opens, and shows black.
@@ -80,6 +95,19 @@ pub struct Config {
     pub thumbnail_cache_enabled: bool,
     pub persistent_index: bool,
     pub file_index: FileIndex,
+}
+
+/// One host in the flake, and how it is rebuilt.
+///
+/// The command is per host rather than one template with the host substituted in, because a
+/// rebuild is usually an alias or a script that already knows its target -- `rebuild-thor`,
+/// `deploy odin` -- and rewriting those from a template gets the wrong machine.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NixHost {
+    pub name: String,
+    /// What rebuilds this host. Empty falls back to `nix_rebuild_command`, with `%HOST%` replaced.
+    #[serde(default)]
+    pub rebuild: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -117,6 +145,12 @@ struct PartialConfig {
     recording_filename: Option<String>,
     recording_notify: Option<bool>,
     recording_framerate: Option<u32>,
+    nix_flake: Option<String>,
+    nix_check_interval_minutes: Option<u64>,
+    nix_update_command: Option<String>,
+    nix_rebuild_command: Option<String>,
+    nix_hosts: Option<Vec<NixHost>>,
+    nix_notify: Option<bool>,
     clipboard_capture_interval_ms: Option<u64>,
     runner_scan_path: Option<bool>,
     runner_commands: Option<Vec<RunnerCommand>>,
@@ -163,6 +197,12 @@ impl Default for Config {
             recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
             recording_notify: true,
             recording_framerate: 30,
+            nix_flake: String::new(),
+            nix_check_interval_minutes: 60,
+            nix_update_command: "nix flake update".into(),
+            nix_rebuild_command: String::new(),
+            nix_hosts: Vec::new(),
+            nix_notify: true,
             clipboard_capture_interval_ms: 250,
             runner_scan_path: true,
             runner_commands: Vec::new(),
@@ -271,6 +311,24 @@ impl Config {
         if let Some(v) = partial.recording_framerate {
             cfg.recording_framerate = v;
         }
+        if let Some(v) = partial.nix_flake {
+            cfg.nix_flake = v;
+        }
+        if let Some(v) = partial.nix_check_interval_minutes {
+            cfg.nix_check_interval_minutes = v;
+        }
+        if let Some(v) = partial.nix_update_command {
+            cfg.nix_update_command = v;
+        }
+        if let Some(v) = partial.nix_rebuild_command {
+            cfg.nix_rebuild_command = v;
+        }
+        if let Some(v) = partial.nix_hosts {
+            cfg.nix_hosts = v;
+        }
+        if let Some(v) = partial.nix_notify {
+            cfg.nix_notify = v;
+        }
         if let Some(v) = partial.clipboard_capture_interval_ms {
             cfg.clipboard_capture_interval_ms = v;
         }
@@ -315,6 +373,7 @@ impl Config {
         self.clipboard_image_dir = expand(&self.clipboard_image_dir);
         self.screenshot_dir = expand(&self.screenshot_dir);
         self.recording_dir = expand(&self.recording_dir);
+        self.nix_flake = expand(&self.nix_flake);
         self.icon_cache_dir = expand(&self.icon_cache_dir);
     }
 }

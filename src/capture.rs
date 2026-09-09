@@ -216,7 +216,6 @@ pub struct Status {
 const GRIM: &str = "grim";
 const SLURP: &str = "slurp";
 const WL_COPY: &str = "wl-copy";
-const NOTIFY_SEND: &str = "notify-send";
 const TESSERACT: &str = "tesseract";
 const WF_RECORDER: &str = "wf-recorder";
 
@@ -305,7 +304,7 @@ pub fn status() -> Status {
             tool(GRIM, "screen capture", true),
             tool(SLURP, "region and window selection", false),
             tool(WL_COPY, "copying shots to the clipboard", false),
-            tool(NOTIFY_SEND, "capture notifications", false),
+            tool("notify-send", "capture notifications", false),
             tool(TESSERACT, "reading text out of a capture", false),
             tool(WF_RECORDER, "screen recording", false),
         ],
@@ -1152,27 +1151,10 @@ fn preview(text: &str, lines: usize, characters: usize) -> String {
     out
 }
 
-/// Send one notification, best-effort. `image` becomes the thumbnail the shell draws.
+/// Send one capture notification. Captures share a tag so a run of them replaces itself in the
+/// toast stack rather than burying the screen.
 fn announce(summary: &str, body: &str, image: Option<&Path>) -> Result<()> {
-    require(NOTIFY_SEND)?;
-    let mut command = Command::new(NOTIFY_SEND);
-    command
-        .arg("--app-name=EpochShell")
-        .arg("--icon=camera-photo");
-    if let Some(image) = image {
-        command.arg(format!("--hint=string:image-path:{}", image.display()));
-    }
-    // Successive captures replace each other in the toast stack instead of stacking up.
-    let status = command
-        .arg("--hint=string:x-canonical-private-synchronous:epoch-screenshot")
-        .arg(summary)
-        .arg(body)
-        .status()
-        .with_context(|| format!("running {NOTIFY_SEND}"))?;
-    if !status.success() {
-        bail!("{NOTIFY_SEND} exited with {status}");
-    }
-    Ok(())
+    crate::notify::send(summary, body, "camera-photo", image, "epoch-screenshot")
 }
 
 // --- Files --------------------------------------------------------------------
