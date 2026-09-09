@@ -57,6 +57,13 @@ pub struct Config {
     /// Tesseract language `capture.ocr` reads with. Several can be joined with `+`, e.g.
     /// `eng+deu`, as long as the data files for them are installed.
     pub ocr_language: String,
+    /// Where `capture.record` writes. Created when the first recording starts.
+    pub recording_dir: String,
+    /// Name for a recording, expanded by `date`. The extension picks the container wf-recorder
+    /// writes, so `.mp4` and `.mkv` both work.
+    pub recording_filename: String,
+    /// Announce a finished recording to the session's notification server.
+    pub recording_notify: bool,
     pub clipboard_capture_interval_ms: u64,
     pub runner_scan_path: bool,
     pub runner_commands: Vec<RunnerCommand>,
@@ -101,6 +108,9 @@ struct PartialConfig {
     screenshot_save: Option<bool>,
     screenshot_notify: Option<bool>,
     ocr_language: Option<String>,
+    recording_dir: Option<String>,
+    recording_filename: Option<String>,
+    recording_notify: Option<bool>,
     clipboard_capture_interval_ms: Option<u64>,
     runner_scan_path: Option<bool>,
     runner_commands: Option<Vec<RunnerCommand>>,
@@ -143,6 +153,9 @@ impl Default for Config {
             screenshot_save: true,
             screenshot_notify: true,
             ocr_language: "eng".into(),
+            recording_dir: home.join("Videos/Recordings").display().to_string(),
+            recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
+            recording_notify: true,
             clipboard_capture_interval_ms: 250,
             runner_scan_path: true,
             runner_commands: Vec::new(),
@@ -239,6 +252,15 @@ impl Config {
         if let Some(v) = partial.ocr_language {
             cfg.ocr_language = v;
         }
+        if let Some(v) = partial.recording_dir {
+            cfg.recording_dir = v;
+        }
+        if let Some(v) = partial.recording_filename {
+            cfg.recording_filename = v;
+        }
+        if let Some(v) = partial.recording_notify {
+            cfg.recording_notify = v;
+        }
         if let Some(v) = partial.clipboard_capture_interval_ms {
             cfg.clipboard_capture_interval_ms = v;
         }
@@ -282,6 +304,7 @@ impl Config {
         self.menus_dir = expand(&self.menus_dir);
         self.clipboard_image_dir = expand(&self.clipboard_image_dir);
         self.screenshot_dir = expand(&self.screenshot_dir);
+        self.recording_dir = expand(&self.recording_dir);
         self.icon_cache_dir = expand(&self.icon_cache_dir);
     }
 }

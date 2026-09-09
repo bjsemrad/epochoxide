@@ -80,6 +80,9 @@
         screenshot_notify = true;
         # Language capture.ocr reads with; join several with "+" (e.g. "eng+deu").
         ocr_language = "eng";
+        recording_dir = "~/Videos/Recordings";
+        recording_filename = "recording-%Y%m%d-%H%M%S.mp4";
+        recording_notify = true;
         clipboard_capture_interval_ms = 250;
         runner_scan_path = true;
         runner_commands = [ ];
@@ -131,11 +134,13 @@
           imagemagick
           librsvg
           fd
-          # Capture. grim and slurp are wlroots screencopy tools rather than compositor-specific
-          # ones, so the same pair serves Hyprland, niri, and sway. libnotify supplies
-          # notify-send, which is how a finished capture reaches the shell's notification server.
+          # Capture. grim, slurp and wf-recorder are wlroots screencopy tools rather than
+          # compositor-specific ones, so the same set serves Hyprland, niri, and sway. libnotify
+          # supplies notify-send, which is how a finished capture reaches the shell's notification
+          # server. tesseract, listed above for clipboard OCR, also backs capture.ocr.
           grim
           slurp
+          wf-recorder
           libnotify
         ];
     in

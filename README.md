@@ -21,6 +21,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - JSON-over-Unix-socket protocol for easy shell integration.
 - Screenshots -- region, window, monitor, or the whole layout -- saved, copied, and announced.
 - OCR capture: read the text out of part of the screen and put it on the clipboard.
+- Screen recording of a region, a window, or a monitor, with the daemon owning the recorder.
 - Versioned Epoch API for normalized compositor state and Tailscale, independent of the launcher.
 
 ## Why
@@ -311,6 +312,9 @@ screenshot_copy = true
 screenshot_save = true
 screenshot_notify = true
 ocr_language = "eng"
+recording_dir = "~/Videos/Recordings"
+recording_filename = "recording-%Y%m%d-%H%M%S.mp4"
+recording_notify = true
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 
@@ -499,7 +503,7 @@ epochoxide api api.describe
 contract version: 1.0
   compositor   available    7 methods
   tailscale    available    3 methods
-  capture      available    3 methods
+  capture      available    6 methods
   localsend    available    9 methods
   dev          planned      0 methods   not implemented in this build
   nix          planned      0 methods   not implemented in this build
@@ -654,6 +658,46 @@ long as the data files are installed.
 Text that comes back empty is a result, not a failure -- a region with nothing legible in it is a
 thing that happens -- so it answers `ok` with `characters: 0`, and the notification says "No text
 found" rather than claiming a copy that did not happen.
+
+```bash
+epochoxide api capture.record                                     # record a region
+epochoxide api capture.record --params '{"mode":"fullscreen"}'
+epochoxide api capture.recording                                  # what is running, if anything
+epochoxide api capture.stopRecording
+```
+
+```json
+{
+  "recording": false,
+  "cancelled": false,
+  "mode": "fullscreen",
+  "path": "/home/you/Videos/Recordings/recording-20260112-144233.mp4",
+  "geometry": null,
+  "output": "eDP-1",
+  "seconds": 42,
+  "bytes": 6815744,
+  "notified": true
+}
+```
+
+A recording is the one stateful thing in the capture group: it outlives the request that started
+it, so the daemon holds the recorder rather than the connection, and only one runs at a time.
+Starting a second one is refused with how long the first has been going rather than quietly
+replacing it. All three methods answer in the shape above, so a shell polling `capture.recording`
+for its indicator and a caller that just pressed stop read the same fields.
+
+`stopRecording` sends SIGINT, which is what makes `wf-recorder` finalize the file instead of
+abandoning it, and waits for the recorder to exit before reporting a size -- a recording announced
+before it is written is a file the user opens to find truncated. A recorder that will not stop
+within ten seconds is killed. Stopping when nothing is recording is not an error: a key bound to
+"stop" pressed twice should say so quietly.
+
+`capture.recording` also answers where the group is unavailable, and notices a recorder that died
+on its own -- the disk filled, the output was unplugged -- so an indicator polling it stops
+counting up against a dead process.
+
+The filename's extension picks the container, so `recording_filename = "recording-%H%M%S.mkv"`
+writes Matroska with no other change.
 
 ### Tailscale
 
@@ -923,6 +967,7 @@ Some providers call common desktop tools when available:
 
 - `wl-clipboard` for clipboard text/image capture, and for putting screenshots on the clipboard.
 - `grim` and `slurp` for screenshots and region selection.
+- `wf-recorder` for screen recording.
 - `libnotify` for `notify-send`, which announces a finished capture.
 - `tesseract` for OCR, both on clipboard images and on `capture.ocr`.
 - `xdg-utils` for opening files/apps.

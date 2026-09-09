@@ -30,6 +30,13 @@ screenshot_notify = true
 # the tesseract data files for them are installed.
 ocr_language = "eng"
 
+# Screen recording. `epochctl capture record [region|window|fullscreen|all]`, and
+# `epochctl capture record stop` to finish. The filename's extension picks the container, so .mkv
+# works as well as .mp4.
+recording_dir = "~/Videos/Recordings"
+recording_filename = "recording-%Y%m%d-%H%M%S.mp4"
+recording_notify = true
+
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 icon_theme = ""

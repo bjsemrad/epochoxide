@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// What to point the camera at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -162,6 +162,26 @@ impl Text {
     }
 }
 
+/// A screen recording, running or finished.
+///
+/// The same shape answers "start", "stop", and "what is happening", so a caller polling for the
+/// bar indicator and a caller that just pressed stop read the same fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct Session {
+    pub recording: bool,
+    /// True when the user cancelled the selection instead of starting anything.
+    pub cancelled: bool,
+    pub mode: String,
+    pub path: Option<String>,
+    pub geometry: Option<String>,
+    pub output: Option<String>,
+    /// How long it has been running, or ran for.
+    pub seconds: u64,
+    /// Size of the finished file. Zero while it is still being written.
+    pub bytes: u64,
+    pub notified: bool,
+}
+
 /// One external tool capture needs, and what stops working without it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tool {
@@ -187,6 +207,9 @@ pub struct Status {
     /// False when tesseract is not installed, which is what `capture.ocr` needs.
     pub ocr: bool,
     pub ocr_language: String,
+    /// False when wf-recorder is not installed, which is what `capture.record` needs.
+    pub record: bool,
+    pub recording_directory: String,
     pub compositor: Option<String>,
 }
 
@@ -195,6 +218,7 @@ const SLURP: &str = "slurp";
 const WL_COPY: &str = "wl-copy";
 const NOTIFY_SEND: &str = "notify-send";
 const TESSERACT: &str = "tesseract";
+const WF_RECORDER: &str = "wf-recorder";
 
 /// How many copy-only screenshots to keep in the scratch directory.
 ///
@@ -211,6 +235,9 @@ struct Settings {
     save: bool,
     notify: bool,
     ocr_language: String,
+    recording_directory: PathBuf,
+    recording_filename: String,
+    recording_notify: bool,
 }
 
 impl Default for Settings {
@@ -223,6 +250,9 @@ impl Default for Settings {
             save: config.screenshot_save,
             notify: config.screenshot_notify,
             ocr_language: config.ocr_language,
+            recording_directory: PathBuf::from(crate::config::expand(&config.recording_dir)),
+            recording_filename: config.recording_filename,
+            recording_notify: config.recording_notify,
         }
     }
 }
@@ -237,6 +267,9 @@ pub fn configure(config: &Config) {
         save: config.screenshot_save,
         notify: config.screenshot_notify,
         ocr_language: config.ocr_language.clone(),
+        recording_directory: PathBuf::from(crate::config::expand(&config.recording_dir)),
+        recording_filename: config.recording_filename.clone(),
+        recording_notify: config.recording_notify,
     });
 }
 
@@ -271,10 +304,13 @@ pub fn status() -> Status {
             tool(WL_COPY, "copying shots to the clipboard", false),
             tool(NOTIFY_SEND, "capture notifications", false),
             tool(TESSERACT, "reading text out of a capture", false),
+            tool(WF_RECORDER, "screen recording", false),
         ],
         window_capture: regions.is_some(),
         ocr: which(TESSERACT).is_some(),
         ocr_language: settings.ocr_language,
+        record: which(WF_RECORDER).is_some(),
+        recording_directory: settings.recording_directory.display().to_string(),
         compositor: compositor::active().map(|backend| backend.name().to_string()),
     }
 }
@@ -290,6 +326,42 @@ struct Frame {
     bytes: u64,
 }
 
+/// What the user pointed at: a rectangle, a whole output, or the entire layout.
+#[derive(Debug, Clone, Default)]
+struct Target {
+    geometry: Option<String>,
+    output: Option<String>,
+    window: Option<String>,
+}
+
+/// Work out what to point the camera at, asking the user when the mode calls for it.
+///
+/// `Ok(None)` is a cancelled selection rather than a failure. This is shared by every capture --
+/// a still, an OCR pass, a recording -- so "what does region mean" is answered in one place.
+fn choose_target(request: &Request) -> Result<Option<Target>> {
+    let mut target = Target::default();
+    match request.mode {
+        Mode::Region => match select_region()? {
+            Some(geometry) => target.geometry = Some(geometry),
+            None => return Ok(None),
+        },
+        Mode::Window => match window_region(request.select)? {
+            Some(region) => {
+                target.window = Some(region.title.clone());
+                target.geometry = Some(region.geometry());
+            }
+            None => return Ok(None),
+        },
+        Mode::Fullscreen => {
+            // Falling back to the whole layout is better than refusing: a single-monitor session
+            // whose compositor does not report a focused output still gets its capture.
+            target.output = request.output.clone().or_else(compositor::focused_monitor);
+        }
+        Mode::All => {}
+    }
+    Ok(Some(target))
+}
+
 /// Ask what to capture, capture it, and leave it in a file.
 ///
 /// `Ok(None)` is a cancelled selection rather than a failure. `save` decides where the file lands:
@@ -302,28 +374,14 @@ fn capture(request: &Request, save: bool) -> Result<Option<Frame>> {
 
     // Selection happens before the delay so the delay is a chance to arrange what is on screen,
     // not dead time before the user is even asked what to capture.
-    let mut window = None;
-    let mut output = None;
-    let geometry = match request.mode {
-        Mode::Region => match select_region()? {
-            Some(geometry) => Some(geometry),
-            None => return Ok(None),
-        },
-        Mode::Window => match window_region(request.select)? {
-            Some(region) => {
-                window = Some(region.title.clone());
-                Some(region.geometry())
-            }
-            None => return Ok(None),
-        },
-        Mode::Fullscreen => {
-            // Falling back to the whole layout is better than refusing: a single-monitor session
-            // whose compositor does not report a focused output still gets its screenshot.
-            output = request.output.clone().or_else(compositor::focused_monitor);
-            None
-        }
-        Mode::All => None,
+    let Some(target) = choose_target(request)? else {
+        return Ok(None);
     };
+    let Target {
+        geometry,
+        output,
+        window,
+    } = target;
 
     if !request.delay.is_zero() {
         std::thread::sleep(request.delay);
@@ -336,11 +394,11 @@ fn capture(request: &Request, save: bool) -> Result<Option<Frame>> {
             .unwrap_or_else(|| settings.directory.clone());
         std::fs::create_dir_all(&directory)
             .with_context(|| format!("creating {}", directory.display()))?;
-        unique(&directory, &filename(&settings.filename))
+        unique(&directory, &filename(&settings.filename, "png"))
     } else {
         let scratch = scratch_dir()?;
         prune(&scratch, SCRATCH_KEPT);
-        unique(&scratch, &filename(&settings.filename))
+        unique(&scratch, &filename(&settings.filename, "png"))
     };
 
     grim(
@@ -459,6 +517,319 @@ pub fn ocr(request: &Request) -> Result<Text> {
     })
 }
 
+// --- Recording ---------------------------------------------------------------
+
+/// The recording in flight, if there is one.
+///
+/// A recording is the one stateful thing in this module: it outlives the request that started it,
+/// so the daemon holds the process rather than the connection. Only one runs at a time -- two
+/// recorders would fight over the same file name and produce two files nobody asked for.
+struct Recording {
+    child: std::process::Child,
+    path: PathBuf,
+    mode: Mode,
+    geometry: Option<String>,
+    output: Option<String>,
+    started: Instant,
+    /// Whatever the recorder said, drained by a thread so a full pipe can never stall it.
+    log: Arc<Mutex<String>>,
+}
+
+static RECORDING: Mutex<Option<Recording>> = Mutex::new(None);
+
+/// How long to let the recorder finish writing the file after being asked to stop, before it is
+/// killed outright. Finalizing an MP4 is quick; this is the bound on a recorder that has wedged.
+const STOP_GRACE: Duration = Duration::from_secs(10);
+
+fn recordings() -> Result<std::sync::MutexGuard<'static, Option<Recording>>> {
+    RECORDING
+        .lock()
+        .map_err(|_| anyhow!("the recording lock is poisoned"))
+}
+
+/// Start recording. Fails rather than silently replacing a recording already in progress.
+pub fn record(request: &Request) -> Result<Session> {
+    require(WF_RECORDER)?;
+    let settings = settings();
+
+    {
+        let slot = recordings()?;
+        if let Some(running) = slot.as_ref() {
+            bail!(
+                "already recording {} for {} -- stop that one first",
+                running.mode.as_str(),
+                human_duration(running.started.elapsed().as_secs())
+            );
+        }
+    }
+
+    let Some(target) = choose_target(request)? else {
+        return Ok(Session {
+            cancelled: true,
+            mode: request.mode.as_str().to_string(),
+            ..Session::default()
+        });
+    };
+
+    if !request.delay.is_zero() {
+        std::thread::sleep(request.delay);
+    }
+
+    let directory = request
+        .directory
+        .clone()
+        .unwrap_or_else(|| settings.recording_directory.clone());
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("creating {}", directory.display()))?;
+    let destination = unique(&directory, &filename(&settings.recording_filename, "mp4"));
+
+    let mut command = Command::new(WF_RECORDER);
+    command.args(["-f", &destination.display().to_string()]);
+    if let Some(geometry) = &target.geometry {
+        command.args(["-g", geometry]);
+    }
+    if let Some(output) = &target.output {
+        command.args(["-o", output]);
+    }
+    // The recorder outlives this request, so it must not hold the caller's stdout; its own
+    // reporting is drained into a buffer instead, where a failure can still be quoted back.
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running {WF_RECORDER}"))?;
+
+    let log = Arc::new(Mutex::new(String::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let sink = Arc::clone(&log);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buffer = String::new();
+            let mut stderr = stderr;
+            let _ = stderr.read_to_string(&mut buffer);
+            if let Ok(mut sink) = sink.lock() {
+                sink.push_str(&buffer);
+            }
+        });
+    }
+
+    // A recorder that cannot start -- no output by that name, no permission to write -- dies
+    // immediately, and reporting that now is far better than a bar indicator counting up against
+    // a process that is already gone.
+    std::thread::sleep(Duration::from_millis(400));
+    if let Some(status) = child.try_wait()? {
+        let detail = log.lock().ok().map(|log| log.trim().to_string());
+        let detail = detail.filter(|detail| !detail.is_empty());
+        let _ = std::fs::remove_file(&destination);
+        match detail {
+            Some(detail) => bail!("{WF_RECORDER} stopped immediately: {}", last_line(&detail)),
+            None => bail!("{WF_RECORDER} stopped immediately ({status})"),
+        }
+    }
+
+    let session = Session {
+        recording: true,
+        cancelled: false,
+        mode: request.mode.as_str().to_string(),
+        path: Some(destination.display().to_string()),
+        geometry: target.geometry.clone(),
+        output: target.output.clone(),
+        seconds: 0,
+        bytes: 0,
+        notified: false,
+    };
+    *recordings()? = Some(Recording {
+        child,
+        path: destination,
+        mode: request.mode,
+        geometry: target.geometry,
+        output: target.output,
+        started: Instant::now(),
+        log,
+    });
+    Ok(session)
+}
+
+/// Stop the recording and wait for the file to be finished.
+///
+/// Stopping when nothing is recording is not an error: a keybinding bound to "stop" pressed twice
+/// should say so quietly rather than fail.
+pub fn stop_recording(notify: Option<bool>) -> Result<Session> {
+    let notify = notify.unwrap_or_else(|| settings().recording_notify);
+    let Some(mut running) = recordings()?.take() else {
+        return Ok(Session::default());
+    };
+
+    let seconds = running.started.elapsed().as_secs();
+    // SIGINT is what tells wf-recorder to finalize the file rather than abandon it. Sent through
+    // kill(1) because nothing else here needs libc, and a signal is not worth a dependency.
+    let interrupted = signal(&running.child, "INT");
+    let finished = wait_for(&mut running.child, STOP_GRACE);
+    if !finished {
+        // A recorder that will not stop leaves a file that may still be usable, so it is killed
+        // rather than left holding the screen capture open forever.
+        signal(&running.child, "KILL");
+        let _ = running.child.wait();
+    }
+
+    let bytes = std::fs::metadata(&running.path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let path = running.path.display().to_string();
+    // An empty file means the recorder never wrote anything worth keeping; saying "saved" over
+    // that would be a lie, and the file itself is not worth leaving behind.
+    let failed = bytes == 0;
+    if failed {
+        let _ = std::fs::remove_file(&running.path);
+    }
+
+    let notified = notify && {
+        let summary = if failed {
+            "Recording failed"
+        } else {
+            "Recording saved"
+        };
+        let body = if failed {
+            let log = running
+                .log
+                .lock()
+                .ok()
+                .map(|log| last_line(log.trim()))
+                .unwrap_or_default();
+            if log.is_empty() {
+                if interrupted {
+                    "Nothing was written".to_string()
+                } else {
+                    "The recorder could not be stopped cleanly".to_string()
+                }
+            } else {
+                log
+            }
+        } else {
+            format!(
+                "{} · {} · {}",
+                file_name(&running.path),
+                human_duration(seconds),
+                human_bytes(bytes)
+            )
+        };
+        announce(summary, &body, None).is_ok()
+    };
+
+    Ok(Session {
+        recording: false,
+        cancelled: false,
+        mode: running.mode.as_str().to_string(),
+        path: if failed { None } else { Some(path) },
+        geometry: running.geometry,
+        output: running.output,
+        seconds,
+        bytes,
+        notified,
+    })
+}
+
+/// What is being recorded right now, if anything.
+///
+/// A recorder that has died on its own -- the disk filled, the output was unplugged -- is noticed
+/// here and cleared, so a bar indicator polling this stops counting up against a dead process.
+pub fn recording() -> Result<Session> {
+    let mut slot = recordings()?;
+    let Some(running) = slot.as_mut() else {
+        return Ok(Session::default());
+    };
+    if running.child.try_wait()?.is_some() {
+        let running = slot.take().expect("checked just above");
+        let bytes = std::fs::metadata(&running.path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        return Ok(Session {
+            recording: false,
+            mode: running.mode.as_str().to_string(),
+            path: Some(running.path.display().to_string()),
+            seconds: running.started.elapsed().as_secs(),
+            bytes,
+            ..Session::default()
+        });
+    }
+    Ok(Session {
+        recording: true,
+        cancelled: false,
+        mode: running.mode.as_str().to_string(),
+        path: Some(running.path.display().to_string()),
+        geometry: running.geometry.clone(),
+        output: running.output.clone(),
+        seconds: running.started.elapsed().as_secs(),
+        bytes: 0,
+        notified: false,
+    })
+}
+
+/// Send a signal by name. Returns whether the signal was delivered.
+fn signal(child: &std::process::Child, name: &str) -> bool {
+    Command::new("kill")
+        .arg(format!("-{name}"))
+        .arg(child.id().to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Wait for a child for at most `grace`. Returns whether it actually exited.
+fn wait_for(child: &mut std::process::Child, grace: Duration) -> bool {
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// The last non-empty line of a tool's output: recorders log a lot, and the failure is at the end.
+fn last_line(text: &str) -> String {
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A duration as a person reads it back: `0:42`, `3:07`, `1:02:13`.
+fn human_duration(seconds: u64) -> String {
+    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// A file size in the units a person reads, not bytes.
+fn human_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    match bytes {
+        0..KB => format!("{bytes} B"),
+        KB..MB => format!("{:.0} KB", bytes as f64 / KB as f64),
+        MB..GB => format!("{:.1} MB", bytes as f64 / MB as f64),
+        _ => format!("{:.2} GB", bytes as f64 / GB as f64),
+    }
+}
+
 // --- Capture -----------------------------------------------------------------
 
 fn grim(
@@ -478,8 +849,16 @@ fn grim(
         command.args(["-o", output]);
     }
     // grim decides the format from the extension only for `-` output, so it is named explicitly.
-    if let Some(format) = image_format(destination) {
-        command.args(["-t", format]);
+    // A name grim cannot write is a mistake in screenshot_filename, and writing PNG bytes into it
+    // under another extension would hide that rather than fix it.
+    match image_format(destination) {
+        Some(format) => {
+            command.args(["-t", format]);
+        }
+        None => bail!(
+            "{GRIM} cannot write {} -- screenshot_filename should end in .png, .jpg, or .ppm",
+            destination.display()
+        ),
     }
     command.arg(destination);
     let out = command
@@ -821,7 +1200,13 @@ fn prune(directory: &Path, keep: usize) {
 
 /// Expand the configured filename template through `date`, which is what makes `%Y-%m-%d` mean
 /// what the user expects in their own timezone.
-fn filename(template: &str) -> String {
+///
+/// `fallback` is the extension to use when the template names no file type at all. It is passed in
+/// rather than assumed, because what a capture should be called depends on what it is: a still is
+/// a `.png`, a recording is an `.mp4`, and a helper that knows only about images turns
+/// `recording-%H%M%S.mp4` into `recording-102636.mp4.png` -- which ffmpeg then tries to write as a
+/// single image and gives up on.
+fn filename(template: &str, fallback: &str) -> String {
     let expanded = Command::new("date")
         .arg(format!("+{template}"))
         .output()
@@ -836,10 +1221,10 @@ fn filename(template: &str) -> String {
     } else {
         expanded
     };
-    if image_format(Path::new(&name)).is_some() {
+    if Path::new(&name).extension().is_some() {
         name
     } else {
-        format!("{name}.png")
+        format!("{name}.{fallback}")
     }
 }
 
@@ -961,22 +1346,25 @@ mod tests {
 
     #[test]
     fn a_filename_template_always_produces_an_image_name() {
-        assert_eq!(filename("shot.png"), "shot.png");
-        assert_eq!(filename("shot.jpg"), "shot.jpg");
+        assert_eq!(filename("shot.png", "png"), "shot.png");
+        assert_eq!(filename("shot.jpg", "png"), "shot.jpg");
         // No extension, so one is added rather than leaving grim to guess.
-        assert_eq!(filename("shot"), "shot.png");
+        assert_eq!(filename("shot", "png"), "shot.png");
+        // A recording keeps the container it names, and gets mp4 when it names none.
+        assert_eq!(filename("clip.mkv", "mp4"), "clip.mkv");
+        assert_eq!(filename("clip", "mp4"), "clip.mp4");
     }
 
     #[test]
     fn a_template_that_would_escape_the_directory_falls_back() {
-        let name = filename("../../%Y/shot.png");
+        let name = filename("../../%Y/shot.png", "png");
         assert!(!name.contains('/'), "{name} still has a path separator");
         assert!(name.ends_with(".png"));
     }
 
     #[test]
     fn a_date_template_is_expanded() {
-        let name = filename("screenshot-%Y.png");
+        let name = filename("screenshot-%Y.png", "png");
         assert!(
             name.starts_with("screenshot-2"),
             "{name} kept its literal %Y"
@@ -1060,6 +1448,41 @@ mod tests {
         let shown = preview(&long, 3, 20);
         assert_eq!(shown.chars().count(), 21, "20 characters and an ellipsis");
         assert!(shown.ends_with('…'));
+    }
+
+    #[test]
+    fn durations_read_the_way_people_say_them() {
+        assert_eq!(human_duration(0), "0:00");
+        assert_eq!(human_duration(42), "0:42");
+        assert_eq!(human_duration(187), "3:07");
+        assert_eq!(human_duration(3733), "1:02:13");
+    }
+
+    #[test]
+    fn sizes_read_the_way_people_say_them() {
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(788_390), "770 KB");
+        assert_eq!(human_bytes(41_943_040), "40.0 MB");
+        assert_eq!(human_bytes(3_221_225_472), "3.00 GB");
+    }
+
+    #[test]
+    fn a_failure_is_reported_from_the_end_of_the_log() {
+        // Recorders log a wall of setup before the line that matters.
+        let log = "selected region\nSetting codec option: crf=20\n\nfailed to open output\n";
+        assert_eq!(last_line(log), "failed to open output");
+        assert_eq!(last_line(""), "");
+    }
+
+    #[test]
+    fn nothing_is_recording_until_something_starts() {
+        // The empty session is what a caller polling for the bar indicator sees, so it must be
+        // honest about having no file and no elapsed time rather than defaulting to true.
+        let idle = Session::default();
+        assert!(!idle.recording);
+        assert!(!idle.cancelled);
+        assert_eq!(idle.path, None);
+        assert_eq!(idle.seconds, 0);
     }
 
     #[test]

@@ -64,6 +64,33 @@ keywords = ["ocr", "text", "copy", "read", "scan"]
 default = "epochctl capture ocr %VALUE%"
 
 [[entries]]
+text = "Record region"
+subtext = "Start recording a rectangle"
+value = "region"
+keywords = ["record", "video", "screencast", "capture"]
+
+[entries.actions]
+default = "epochctl capture record %VALUE%"
+
+[[entries]]
+text = "Record this monitor"
+subtext = "Start recording the focused screen"
+value = "fullscreen --delay 0.5"
+keywords = ["record", "video", "screencast", "monitor"]
+
+[entries.actions]
+default = "epochctl capture record %VALUE%"
+
+[[entries]]
+text = "Stop recording"
+subtext = "Finish the recording in progress"
+value = "stop"
+keywords = ["record", "stop", "finish", "end"]
+
+[entries.actions]
+default = "epochctl capture record %VALUE%"
+
+[[entries]]
 text = "Screenshots folder"
 subtext = "Open where shots are saved"
 value = "~/Pictures/Screenshots"

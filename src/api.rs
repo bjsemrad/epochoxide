@@ -256,6 +256,39 @@ const CAPTURE: &[Method] = &[
         ],
     ),
     method(
+        "record",
+        "Start recording the screen",
+        &[
+            (
+                "mode",
+                "optional string: region (default), window, fullscreen, or all",
+            ),
+            (
+                "output",
+                "optional string, a monitor name from compositor.monitors; fullscreen only",
+            ),
+            (
+                "select",
+                "optional bool; click the window instead of taking the focused one",
+            ),
+            ("delay", "optional number of seconds to wait before starting"),
+            (
+                "directory",
+                "optional string; where to write, defaulting to recording_dir",
+            ),
+        ],
+    ),
+    method(
+        "stopRecording",
+        "Stop the recording in progress and finish the file",
+        &[("notify", "optional bool, defaulting to recording_notify")],
+    ),
+    method(
+        "recording",
+        "What is being recorded right now, if anything",
+        &[],
+    ),
+    method(
         "status",
         "Where screenshots land, which capture tools are installed, and what this compositor supports",
         &[],
@@ -355,8 +388,10 @@ const GROUPS: &[Group] = &[
 ///
 /// A diagnostic is worth calling precisely when the thing it diagnoses is missing: `capture.status`
 /// is how a caller finds out that grim is not installed, so refusing it because grim is not
-/// installed would leave nobody able to ask.
-const ALWAYS_ANSWERS: &[&str] = &["capture.status"];
+/// installed would leave nobody able to ask. `capture.recording` is the same kind of question: the
+/// shell polls it to draw its indicator, and "is anything recording" has an answer on a machine
+/// with no grim.
+const ALWAYS_ANSWERS: &[&str] = &["capture.status", "capture.recording"];
 
 /// A group's availability is decided at call time, not at startup: a compositor can be restarted
 /// and Tailscale can be installed without EpochOxide being restarted.
@@ -702,6 +737,13 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
         ("capture", "ocr") => {
             value(capture::ocr(&capture_request(params)?).map_err(backend_error)?)
         }
+        ("capture", "record") => {
+            value(capture::record(&capture_request(params)?).map_err(backend_error)?)
+        }
+        ("capture", "stopRecording") => {
+            value(capture::stop_recording(param_bool(params, "notify")).map_err(backend_error)?)
+        }
+        ("capture", "recording") => value(capture::recording().map_err(backend_error)?),
         ("localsend", "devices") => value(localsend::devices().map_err(backend_error)?),
         ("localsend", "status") => Ok(match localsend::receiver() {
             Some(receiver) => json!({
