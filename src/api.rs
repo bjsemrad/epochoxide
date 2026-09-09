@@ -18,7 +18,7 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{compositor, tailscale};
+use crate::{compositor, localsend, tailscale};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -205,6 +205,39 @@ const TAILSCALE: &[Method] = &[
     ),
 ];
 
+const LOCALSEND: &[Method] = &[
+    method("devices", "Discover LocalSend devices on the network", &[]),
+    method(
+        "status",
+        "Whether this machine is accepting transfers, and where they land",
+        &[],
+    ),
+    method(
+        "pending",
+        "Transfers waiting for someone to accept them",
+        &[],
+    ),
+    method(
+        "accept",
+        "Accept a waiting transfer",
+        &[("session", "string, from localsend.pending")],
+    ),
+    method(
+        "decline",
+        "Decline a waiting transfer",
+        &[("session", "string, from localsend.pending")],
+    ),
+    method("received", "Files accepted since the daemon started", &[]),
+    method(
+        "send",
+        "Send files to a device",
+        &[
+            ("device", "string, an alias from localsend.devices"),
+            ("files", "array of absolute paths"),
+        ],
+    ),
+];
+
 const GROUPS: &[Group] = &[
     Group {
         name: "compositor",
@@ -226,7 +259,7 @@ const GROUPS: &[Group] = &[
     Group {
         name: "localsend",
         summary: "LocalSend device discovery and transfers",
-        methods: &[],
+        methods: LOCALSEND,
     },
     Group {
         name: "dev",
@@ -260,6 +293,12 @@ fn availability(group: &str) -> Availability {
                 Availability::Unavailable("the tailscale CLI is not installed".into())
             }
         }
+        // Discovery needs the multicast port, which is the one thing that can stop this working
+        // on an otherwise fine machine.
+        "localsend" => match localsend::available() {
+            Ok(()) => Availability::Available,
+            Err(err) => Availability::Unavailable(err.to_string()),
+        },
         _ => Availability::Planned,
     }
 }
@@ -331,6 +370,16 @@ pub fn stream(
             format!("\"{method}\" is not a streaming method"),
         )),
     }
+}
+
+/// The running receiver, or a typed error explaining that transfers are not being accepted.
+fn receiving() -> Result<&'static std::sync::Arc<localsend::server::Receiver>, ApiError> {
+    localsend::receiver().ok_or_else(|| {
+        ApiError::new(
+            ErrorCode::Unavailable,
+            "this machine is not accepting LocalSend transfers (localsend_receive is off, or the receiver failed to start)",
+        )
+    })
 }
 
 fn param_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, ApiError> {
@@ -464,6 +513,37 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
         ("tailscale", "receive") => {
             let directory = param_str(params, "directory")?;
             value(tailscale::receive(directory).map_err(backend_error)?)
+        }
+        ("localsend", "devices") => value(localsend::devices().map_err(backend_error)?),
+        ("localsend", "status") => Ok(match localsend::receiver() {
+            Some(receiver) => json!({
+                "receiving": true,
+                "alias": receiver.alias(),
+                "fingerprint": receiver.fingerprint(),
+                "port": receiver.port(),
+                "download_dir": receiver.download_dir().display().to_string(),
+                "pending": receiver.pending().len(),
+            }),
+            None => json!({ "receiving": false }),
+        }),
+        ("localsend", "pending") => value(receiving()?.pending()),
+        ("localsend", "received") => value(receiving()?.received()),
+        ("localsend", "accept") => {
+            receiving()?
+                .accept(param_str(params, "session")?)
+                .map_err(backend_error)?;
+            Ok(json!({ "accepted": true }))
+        }
+        ("localsend", "decline") => {
+            receiving()?
+                .decline(param_str(params, "session")?)
+                .map_err(backend_error)?;
+            Ok(json!({ "declined": true }))
+        }
+        ("localsend", "send") => {
+            let device = param_str(params, "device")?;
+            let files = param_strings(params, "files")?;
+            value(localsend::send(device, &files).map_err(backend_error)?)
         }
         ("tailscale", "send") => {
             let peer = param_str(params, "peer")?;

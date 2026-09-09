@@ -36,6 +36,13 @@ pub struct Config {
     pub clipboard_text_editor: String,
     pub clipboard_image_editor: String,
     pub clipboard_ocr: bool,
+    /// Accept incoming LocalSend transfers. The receiver binds a port and answers discovery, so
+    /// it is opt-in-able rather than always on.
+    pub localsend_receive: bool,
+    /// Where accepted transfers are written.
+    pub localsend_download_dir: String,
+    /// Name shown to other devices. Empty means use the host name.
+    pub localsend_alias: String,
     pub clipboard_capture_interval_ms: u64,
     pub runner_scan_path: bool,
     pub runner_commands: Vec<RunnerCommand>,
@@ -71,6 +78,9 @@ struct PartialConfig {
     clipboard_text_editor: Option<String>,
     clipboard_image_editor: Option<String>,
     clipboard_ocr: Option<bool>,
+    localsend_receive: Option<bool>,
+    localsend_download_dir: Option<String>,
+    localsend_alias: Option<String>,
     clipboard_capture_interval_ms: Option<u64>,
     runner_scan_path: Option<bool>,
     runner_commands: Option<Vec<RunnerCommand>>,
@@ -104,6 +114,9 @@ impl Default for Config {
                 .unwrap_or_else(|_| "xdg-open".to_string()),
             clipboard_image_editor: String::new(),
             clipboard_ocr: false,
+            localsend_receive: true,
+            localsend_download_dir: "~/Downloads".into(),
+            localsend_alias: String::new(),
             clipboard_capture_interval_ms: 250,
             runner_scan_path: true,
             runner_commands: Vec::new(),
@@ -169,6 +182,15 @@ impl Config {
         }
         if let Some(v) = partial.clipboard_image_editor {
             cfg.clipboard_image_editor = v;
+        }
+        if let Some(v) = partial.localsend_receive {
+            cfg.localsend_receive = v;
+        }
+        if let Some(v) = partial.localsend_download_dir {
+            cfg.localsend_download_dir = v;
+        }
+        if let Some(v) = partial.localsend_alias {
+            cfg.localsend_alias = v;
         }
         if let Some(v) = partial.clipboard_ocr {
             cfg.clipboard_ocr = v;
