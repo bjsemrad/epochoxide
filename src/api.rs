@@ -18,7 +18,7 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{capture, compositor, localsend, nix, power, tailscale};
+use crate::{awake, capture, compositor, localsend, nix, power, tailscale};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -375,11 +375,27 @@ const NIX: &[Method] = &[
     ),
 ];
 
-const SYSTEM: &[Method] = &[method(
-    "power",
-    "CPU power state: profile, governor, energy preference, turbo, and what is managing them",
-    &[],
-)];
+const SYSTEM: &[Method] = &[
+    method(
+        "power",
+        "CPU power state: profile, governor, energy preference, turbo, and what is managing them",
+        &[],
+    ),
+    method(
+        "stayAwake",
+        "Whether the machine is being held out of idle and sleep",
+        &[],
+    ),
+    method(
+        "setStayAwake",
+        "Hold the machine awake, or let it idle again",
+        &[
+            ("enabled", "optional bool; omit to toggle"),
+            ("reason", "optional string shown in systemd-inhibit --list"),
+            ("notify", "optional bool, defaulting to true"),
+        ],
+    ),
+];
 
 const GROUPS: &[Group] = &[
     Group {
@@ -428,7 +444,12 @@ const GROUPS: &[Group] = &[
 /// installed would leave nobody able to ask. `capture.recording` is the same kind of question: the
 /// shell polls it to draw its indicator, and "is anything recording" has an answer on a machine
 /// with no grim.
-const ALWAYS_ANSWERS: &[&str] = &["capture.status", "capture.recording", "nix.status"];
+const ALWAYS_ANSWERS: &[&str] = &[
+    "capture.status",
+    "capture.recording",
+    "nix.status",
+    "system.stayAwake",
+];
 
 /// A group's availability is decided at call time, not at startup: a compositor can be restarted
 /// and Tailscale can be installed without EpochOxide being restarted.
@@ -790,6 +811,12 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
         }
         ("capture", "recording") => value(capture::recording().map_err(backend_error)?),
         ("system", "power") => value(power::status()),
+        ("system", "stayAwake") => value(awake::status()),
+        ("system", "setStayAwake") => {
+            let reason = params.get("reason").and_then(Value::as_str);
+            let notify = param_bool(params, "notify").unwrap_or(true);
+            value(awake::set(param_bool(params, "enabled"), reason, notify).map_err(backend_error)?)
+        }
         ("nix", "status") => value(nix::status()),
         ("nix", "check") => value(nix::check().map_err(backend_error)?),
         ("nix", "update") => {

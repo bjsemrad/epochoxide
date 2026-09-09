@@ -1,4 +1,5 @@
 mod api;
+mod awake;
 mod capture;
 mod client;
 mod compositor;
