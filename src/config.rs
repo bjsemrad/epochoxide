@@ -64,6 +64,11 @@ pub struct Config {
     pub recording_filename: String,
     /// Announce a finished recording to the session's notification server.
     pub recording_notify: bool,
+    /// Frames per second to record at. A constant rate is what keeps the file playable: left to
+    /// pick its own timing, wf-recorder writes a stream declaring 90000fps, and x264 derives an
+    /// H.264 level from that which players refuse to decode -- the video opens, and shows black.
+    /// Zero hands the timing back to wf-recorder.
+    pub recording_framerate: u32,
     pub clipboard_capture_interval_ms: u64,
     pub runner_scan_path: bool,
     pub runner_commands: Vec<RunnerCommand>,
@@ -111,6 +116,7 @@ struct PartialConfig {
     recording_dir: Option<String>,
     recording_filename: Option<String>,
     recording_notify: Option<bool>,
+    recording_framerate: Option<u32>,
     clipboard_capture_interval_ms: Option<u64>,
     runner_scan_path: Option<bool>,
     runner_commands: Option<Vec<RunnerCommand>>,
@@ -156,6 +162,7 @@ impl Default for Config {
             recording_dir: home.join("Videos/Recordings").display().to_string(),
             recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
             recording_notify: true,
+            recording_framerate: 30,
             clipboard_capture_interval_ms: 250,
             runner_scan_path: true,
             runner_commands: Vec::new(),
@@ -260,6 +267,9 @@ impl Config {
         }
         if let Some(v) = partial.recording_notify {
             cfg.recording_notify = v;
+        }
+        if let Some(v) = partial.recording_framerate {
+            cfg.recording_framerate = v;
         }
         if let Some(v) = partial.clipboard_capture_interval_ms {
             cfg.clipboard_capture_interval_ms = v;

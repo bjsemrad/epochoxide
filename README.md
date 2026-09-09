@@ -315,6 +315,7 @@ ocr_language = "eng"
 recording_dir = "~/Videos/Recordings"
 recording_filename = "recording-%Y%m%d-%H%M%S.mp4"
 recording_notify = true
+recording_framerate = 30
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
 
@@ -698,6 +699,12 @@ counting up against a dead process.
 
 The filename's extension picks the container, so `recording_filename = "recording-%H%M%S.mkv"`
 writes Matroska with no other change.
+
+Recording happens at a constant `recording_framerate` (30 by default), which is a compatibility
+setting rather than a quality one. Left to time itself, wf-recorder writes a stream declaring
+90000fps, and x264 derives H.264 level 6.2 from that -- above what players will decode. The frames
+inside are perfectly good; the video simply opens and shows black. Setting it to zero hands the
+timing back to wf-recorder.
 
 ### Tailscale
 

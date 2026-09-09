@@ -83,6 +83,8 @@
         recording_dir = "~/Videos/Recordings";
         recording_filename = "recording-%Y%m%d-%H%M%S.mp4";
         recording_notify = true;
+        # A constant framerate keeps the file playable; see config.example.toml.
+        recording_framerate = 30;
         clipboard_capture_interval_ms = 250;
         runner_scan_path = true;
         runner_commands = [ ];

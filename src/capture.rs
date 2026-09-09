@@ -238,6 +238,7 @@ struct Settings {
     recording_directory: PathBuf,
     recording_filename: String,
     recording_notify: bool,
+    recording_framerate: u32,
 }
 
 impl Default for Settings {
@@ -253,6 +254,7 @@ impl Default for Settings {
             recording_directory: PathBuf::from(crate::config::expand(&config.recording_dir)),
             recording_filename: config.recording_filename,
             recording_notify: config.recording_notify,
+            recording_framerate: config.recording_framerate,
         }
     }
 }
@@ -270,6 +272,7 @@ pub fn configure(config: &Config) {
         recording_directory: PathBuf::from(crate::config::expand(&config.recording_dir)),
         recording_filename: config.recording_filename.clone(),
         recording_notify: config.recording_notify,
+        recording_framerate: config.recording_framerate,
     });
 }
 
@@ -585,6 +588,13 @@ pub fn record(request: &Request) -> Result<Session> {
 
     let mut command = Command::new(WF_RECORDER);
     command.args(["-f", &destination.display().to_string()]);
+    // Recording at a constant rate is not a quality setting, it is what makes the file playable.
+    // Left to time itself, wf-recorder writes a stream declaring 90000fps, from which x264 derives
+    // level 6.2 -- above what players will decode, so the video opens and shows black while the
+    // frames inside it are perfectly good.
+    if settings.recording_framerate > 0 {
+        command.args(["-r", &settings.recording_framerate.to_string()]);
+    }
     if let Some(geometry) = &target.geometry {
         command.args(["-g", geometry]);
     }

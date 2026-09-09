@@ -36,6 +36,10 @@ ocr_language = "eng"
 recording_dir = "~/Videos/Recordings"
 recording_filename = "recording-%Y%m%d-%H%M%S.mp4"
 recording_notify = true
+# A constant framerate is what keeps the file playable: left to time itself, wf-recorder declares
+# 90000fps and x264 derives an H.264 level players refuse to decode, so the video opens black.
+# Zero hands the timing back to wf-recorder.
+recording_framerate = 30
 
 clipboard_capture_interval_ms = 250
 runner_scan_path = true
