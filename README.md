@@ -565,16 +565,65 @@ does not need a daemon restart. Adding one means adding a module and a line in `
 ```bash
 epochoxide api tailscale.status
 epochoxide api tailscale.machines
+epochoxide api tailscale.up
+epochoxide api tailscale.down
+epochoxide api tailscale.pendingFiles
+epochoxide api tailscale.receive --params '{"directory":"/home/you/Downloads"}'
 epochoxide api tailscale.send --params '{"peer":"phone","files":["/home/you/notes.pdf"]}'
 ```
 
 `status` normalizes backend state, tailnet, exit node, and health warnings. `machines` lists this
-device first, then peers by name.
+device first, then peers by name. `up` and `down` change the Tailscale backend state. `pendingFiles`
+checks the Taildrop inbox without consuming it; `receive` moves waiting files into the selected
+directory, renaming conflicts instead of overwriting.
 
 One deliberate divergence from what Tailscale reports: for *this* device, `online` follows the
 backend state rather than `Self.Online`, which Tailscale sets false whenever it cannot reach the
 coordination server — even with the tailnet up. Showing the local machine as offline next to a
 status of `Running` would be a contradiction, so the normalization resolves it.
+
+### LocalSend
+
+```bash
+epochoxide api localsend.devices
+epochoxide api localsend.send --params '{"device":"Energetic Lettuce","files":["/home/you/notes.pdf"]}'
+```
+
+```json
+{
+  "alias": "Energetic Lettuce",
+  "fingerprint": "7D73C6BF…",
+  "device_model": "Linux",
+  "device_type": "desktop",
+  "ip": "10.0.10.13",
+  "port": 53317,
+  "protocol": "https",
+  "download": false
+}
+```
+
+LocalSend has no CLI to shell out to, so this speaks the v2 protocol directly. Discovery announces
+this machine to the multicast group `224.0.0.167:53317` and collects the devices that answer; a
+device's IP comes from the datagram it sent, never from the payload, so a device cannot claim to be
+somewhere it is not.
+
+The discovery socket sets `SO_REUSEADDR`/`SO_REUSEPORT`, because multicast has to be received on
+the group's own port and the LocalSend desktop app is usually already bound to it -- which is
+exactly when discovery needs to work.
+
+**Trust.** LocalSend uses self-signed certificates and no CA: a device announces the SHA-256
+fingerprint of its certificate, and identity is that fingerprint. Sending therefore pins it -- a
+TLS connection is accepted only when the certificate presented hashes to the value the device
+announced. Accepting any certificate, which is the easy path, would let anything on the LAN
+impersonate a device and receive the files.
+
+Sending is two steps: `prepare-upload` registers the transfer and returns a session plus a token
+per file, then each file is uploaded with its token. `prepare-upload` does not answer until someone
+accepts the transfer on the receiving device, so a send can sit waiting for a while; a timeout
+there says so rather than reporting a bare network error.
+
+Receiving is deliberately not implemented -- it means running a server, holding a certificate, and
+prompting to accept a transfer, which is the shell's job rather than a data provider's.
 
 ### Over the socket
 

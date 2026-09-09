@@ -5,6 +5,7 @@ mod config;
 mod fuzzy;
 mod history;
 mod icons;
+mod localsend;
 mod providers;
 mod server;
 mod service;

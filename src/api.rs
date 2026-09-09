@@ -18,7 +18,7 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{compositor, tailscale};
+use crate::{compositor, localsend, tailscale};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -82,8 +82,12 @@ impl std::fmt::Display for ApiError {
     }
 }
 
-fn backend_error(err: impl std::fmt::Display) -> ApiError {
-    ApiError::new(ErrorCode::BackendError, err.to_string())
+/// Wrap a backend failure, keeping its whole cause chain.
+///
+/// anyhow's `Display` shows only the outermost context, so a failure three layers down arrives as
+/// "asking X to accept the transfer" with no hint of why. The alternate form keeps the chain.
+fn backend_error(err: anyhow::Error) -> ApiError {
+    ApiError::new(ErrorCode::BackendError, format!("{err:#}"))
 }
 
 /// Whether a group can be called on this machine, and why not when it cannot.
@@ -183,11 +187,31 @@ const COMPOSITOR: &[Method] = &[
 const TAILSCALE: &[Method] = &[
     method("status", "Backend state, tailnet, exit node, health", &[]),
     method("machines", "Every machine in the tailnet", &[]),
+    method("up", "Bring Tailscale up", &[]),
+    method("down", "Bring Tailscale down", &[]),
+    method("pendingFiles", "Files waiting in the Taildrop inbox", &[]),
+    method(
+        "receive",
+        "Receive waiting Taildrop files into a directory",
+        &[("directory", "target directory")],
+    ),
     method(
         "send",
         "Send files to a peer with Taildrop",
         &[
             ("peer", "string, a name from tailscale.machines"),
+            ("files", "array of absolute paths"),
+        ],
+    ),
+];
+
+const LOCALSEND: &[Method] = &[
+    method("devices", "Discover LocalSend devices on the network", &[]),
+    method(
+        "send",
+        "Send files to a device",
+        &[
+            ("device", "string, an alias from localsend.devices"),
             ("files", "array of absolute paths"),
         ],
     ),
@@ -214,7 +238,7 @@ const GROUPS: &[Group] = &[
     Group {
         name: "localsend",
         summary: "LocalSend device discovery and transfers",
-        methods: &[],
+        methods: LOCALSEND,
     },
     Group {
         name: "dev",
@@ -248,6 +272,12 @@ fn availability(group: &str) -> Availability {
                 Availability::Unavailable("the tailscale CLI is not installed".into())
             }
         }
+        // Discovery needs the multicast port, which is the one thing that can stop this working
+        // on an otherwise fine machine.
+        "localsend" => match localsend::available() {
+            Ok(()) => Availability::Available,
+            Err(err) => Availability::Unavailable(err.to_string()),
+        },
         _ => Availability::Planned,
     }
 }
@@ -440,6 +470,25 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
         )),
         ("tailscale", "status") => value(tailscale::status().map_err(backend_error)?),
         ("tailscale", "machines") => value(tailscale::machines().map_err(backend_error)?),
+        ("tailscale", "up") => {
+            tailscale::up().map_err(backend_error)?;
+            Ok(json!({ "running": true }))
+        }
+        ("tailscale", "down") => {
+            tailscale::down().map_err(backend_error)?;
+            Ok(json!({ "running": false }))
+        }
+        ("tailscale", "pendingFiles") => value(tailscale::pending_files().map_err(backend_error)?),
+        ("tailscale", "receive") => {
+            let directory = param_str(params, "directory")?;
+            value(tailscale::receive(directory).map_err(backend_error)?)
+        }
+        ("localsend", "devices") => value(localsend::devices().map_err(backend_error)?),
+        ("localsend", "send") => {
+            let device = param_str(params, "device")?;
+            let files = param_strings(params, "files")?;
+            value(localsend::send(device, &files).map_err(backend_error)?)
+        }
         ("tailscale", "send") => {
             let peer = param_str(params, "peer")?;
             let files = param_strings(params, "files")?;

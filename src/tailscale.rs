@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::process::Command;
+use std::{path::Path, process::Command};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Machine {
@@ -43,6 +43,27 @@ pub struct Status {
     pub health: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WaitingFile {
+    pub name: String,
+    pub size: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReceiveResult {
+    pub moved: usize,
+    pub total: usize,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalWaitingFile {
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Size")]
+    size: i64,
+}
+
 /// Whether the Tailscale CLI is installed at all. Used to decide the API group's availability
 /// rather than failing every call.
 pub fn available() -> bool {
@@ -74,6 +95,20 @@ fn status_json() -> Result<Value> {
         });
     }
     serde_json::from_slice(&output.stdout).context("parsing tailscale status")
+}
+
+fn command_error(action: &str, output: &std::process::Output) -> String {
+    let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if err.is_empty() {
+        let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if out.is_empty() {
+            format!("{action} failed")
+        } else {
+            out
+        }
+    } else {
+        err
+    }
 }
 
 fn string(value: &Value, key: &str) -> String {
@@ -184,6 +219,129 @@ pub fn machines() -> Result<Vec<Machine>> {
     Ok(out)
 }
 
+fn set_running(running: bool) -> Result<()> {
+    if !available() {
+        bail!("tailscale is not installed");
+    }
+    let output = Command::new("tailscale")
+        .arg(if running { "up" } else { "down" })
+        .output()
+        .context(if running {
+            "running tailscale up"
+        } else {
+            "running tailscale down"
+        })?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(if err.is_empty() {
+            if running {
+                "tailscale up failed".to_string()
+            } else {
+                "tailscale down failed".to_string()
+            }
+        } else {
+            err
+        });
+    }
+    Ok(())
+}
+
+pub fn up() -> Result<()> {
+    set_running(true)
+}
+
+pub fn down() -> Result<()> {
+    set_running(false)
+}
+
+fn parse_waiting_files(value: Value) -> Result<Vec<WaitingFile>> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let files: Vec<LocalWaitingFile> = serde_json::from_value(value).context("parsing waiting files")?;
+    Ok(files
+        .into_iter()
+        .map(|file| WaitingFile {
+            name: file.name,
+            size: file.size,
+        })
+        .collect())
+}
+
+pub fn pending_files() -> Result<Vec<WaitingFile>> {
+    if !available() {
+        bail!("tailscale is not installed");
+    }
+    let output = Command::new("tailscale")
+        .args(["debug", "localapi", "GET", "/localapi/v0/files/"])
+        .output()
+        .context("asking tailscale for waiting files")?;
+    if !output.status.success() {
+        bail!(command_error("checking waiting files", &output));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).context("parsing waiting files JSON")?;
+    parse_waiting_files(value)
+}
+
+fn parse_receive_result(text: &str, total_hint: usize) -> ReceiveResult {
+    let mut files = Vec::new();
+    let mut moved = 0;
+    let mut total = total_hint;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("wrote ") {
+            if let Some((_, after_as)) = rest.split_once(" as ") {
+                let path = after_as
+                    .rsplit_once(" (")
+                    .map(|(path, _)| path)
+                    .unwrap_or(after_as)
+                    .to_string();
+                files.push(path);
+            }
+        }
+        if let Some(rest) = line.strip_prefix("moved ") {
+            if let Some((done, count)) = rest.split_once('/') {
+                moved = done.trim().parse().unwrap_or(moved);
+                if let Some(end) = count.split_whitespace().next() {
+                    total = end.parse().unwrap_or(total);
+                }
+            }
+        }
+    }
+    if moved == 0 && !files.is_empty() {
+        moved = files.len();
+    }
+    if total == 0 && !files.is_empty() {
+        total = files.len();
+    }
+    ReceiveResult { moved, total, files }
+}
+
+pub fn receive(directory: &str) -> Result<ReceiveResult> {
+    if !available() {
+        bail!("tailscale is not installed");
+    }
+    let dir = Path::new(directory);
+    if !dir.is_dir() {
+        bail!("{directory:?} is not a directory");
+    }
+    let total_hint = pending_files().map(|files| files.len()).unwrap_or(0);
+    let output = Command::new("tailscale")
+        .args(["file", "get", "--verbose", "--conflict=rename", directory])
+        .output()
+        .context("running tailscale file get")?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = parse_receive_result(&text, total_hint);
+    if !output.status.success() {
+        bail!(command_error("receiving files", &output));
+    }
+    Ok(result)
+}
+
 /// Send files to a peer with Taildrop.
 ///
 /// The peer is named the way `machines` reports it -- short name or MagicDNS name -- and is
@@ -230,4 +388,41 @@ pub fn send(peer: &str, files: &[String]) -> Result<()> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn waiting_files_normalize_null_to_empty() {
+        assert_eq!(parse_waiting_files(Value::Null).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn waiting_files_normalize_localapi_shape() {
+        assert_eq!(
+            parse_waiting_files(json!([{ "Name": "note.txt", "Size": 42 }])).unwrap(),
+            vec![WaitingFile {
+                name: "note.txt".into(),
+                size: 42,
+            }]
+        );
+    }
+
+    #[test]
+    fn receive_result_parses_verbose_output() {
+        assert_eq!(
+            parse_receive_result(
+                "wrote note.txt as /tmp/Downloads/note (1).txt (42 bytes)\nmoved 1/1 files\n",
+                0,
+            ),
+            ReceiveResult {
+                moved: 1,
+                total: 1,
+                files: vec!["/tmp/Downloads/note (1).txt".into()],
+            }
+        );
+    }
 }
