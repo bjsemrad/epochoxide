@@ -1,0 +1,79 @@
+name = "system"
+name_pretty = "System"
+description = "Updates, idle, and session actions"
+icon = "preferences-system"
+
+# Most entries drive epochctl, so the launcher, a keybinding and a script all do the same thing.
+action = "%VALUE%"
+
+[[entries]]
+text = "Check for updates"
+subtext = "Resolve every flake input; nothing is written to the flake"
+value = "epochctl nix check"
+keywords = ["nix", "flake", "update", "upgrade"]
+
+[[entries]]
+text = "Update flake"
+subtext = "Open a terminal running the configured update command"
+value = "epochctl nix update"
+keywords = ["nix", "flake", "update", "lock"]
+
+# A rebuild is per host and per machine, so it is left commented rather than guessed at. Add one
+# entry per host, with whatever command actually rebuilds it -- `epochctl nix hosts` lists them.
+#
+# [[entries]]
+# text = "Rebuild thor"
+# subtext = "nixos-rebuild switch for this machine"
+# value = "epochctl nix rebuild thor"
+# keywords = ["nix", "rebuild", "switch"]
+
+[[entries]]
+text = "Stay awake"
+subtext = "Toggle: hold the machine out of idle and sleep"
+value = "epochctl toggle stay-awake"
+keywords = ["idle", "inhibit", "caffeine", "sleep", "presentation", "awake"]
+
+[[entries]]
+text = "Stay awake on"
+subtext = "Hold it awake regardless of what it was"
+value = "epochctl toggle stay-awake on"
+keywords = ["idle", "inhibit", "caffeine", "awake"]
+
+[[entries]]
+text = "Stay awake off"
+subtext = "Let it idle and sleep normally again"
+value = "epochctl toggle stay-awake off"
+keywords = ["idle", "inhibit", "sleep", "normal"]
+
+[[entries]]
+text = "Lock screen"
+subtext = "Through logind, so the session's own locker runs"
+value = "loginctl lock-session"
+keywords = ["lock", "screen", "away", "hyprlock"]
+
+[[entries]]
+text = "Sleep"
+subtext = "Suspend to RAM"
+value = "systemctl suspend"
+keywords = ["suspend", "sleep", "ram"]
+
+# The session-ending entries sit at the bottom deliberately: a launcher is one keystroke from
+# running whatever is selected, and these are the three that cannot be taken back.
+
+[[entries]]
+text = "Log out"
+subtext = "Quit the compositor and return to the login screen"
+value = "([ -n \"$HYPRLAND_INSTANCE_SIGNATURE\" ] && hyprctl dispatch exit) || niri msg action quit || loginctl terminate-session \"$XDG_SESSION_ID\""
+keywords = ["logout", "exit", "session", "quit"]
+
+[[entries]]
+text = "Restart"
+subtext = "Reboot the machine"
+value = "systemctl reboot"
+keywords = ["reboot", "restart"]
+
+[[entries]]
+text = "Shut down"
+subtext = "Power the machine off"
+value = "systemctl poweroff"
+keywords = ["shutdown", "poweroff", "off", "halt"]
