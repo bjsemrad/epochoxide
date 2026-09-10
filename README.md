@@ -24,6 +24,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - Screen recording of a region, a window, or a monitor, with the daemon owning the recorder.
 - Nix flake update awareness: what could move, checked without writing to your flake.
 - CPU power state -- profile, governor, energy preference, turbo -- read from sysfs.
+- Night mode: the screen warmed for as long as it is on, on Hyprland or niri.
 - Machine identity, battery wear, and the firmware updates fwupd is offering.
 - Versioned Epoch API for normalized compositor state and Tailscale, independent of the launcher.
 
@@ -514,7 +515,7 @@ contract version: 1.0
   localsend    available    9 methods
   dev          planned      0 methods   not implemented in this build
   nix          available    5 methods
-  system       available    5 methods
+  system       available    9 methods
 ```
 
 Groups marked `planned` are part of the contract but not implemented; they answer with
@@ -851,6 +852,13 @@ for reading a number.
 daemon and firmware does not change faster than that. It never downloads metadata and never
 installs anything: flashing firmware is the user's own `fwupdmgr update`.
 
+`setNightLight` warms the screen by holding whichever of `hyprsunset`, `gammastep` or `wlsunset` is
+installed: each holds a `wlr-gamma-control` object for as long as it runs and hands the screen back
+when it exits, so turning night mode off is killing that process and nothing can leave a session
+tinted after the daemon goes away. hyprsunset is preferred and works on niri too, which implements
+the same protocol. Asking for a different temperature while it is already on restarts the tool,
+since none of them can be re-aimed once running.
+
 `setStayAwake` holds the machine out of idle and sleep by keeping a `systemd-inhibit` process
 alive; omitting `enabled` toggles. Everything that idles a session watches logind, so that is where
 the lock is taken -- and the shell adds a Wayland idle-inhibit against its own surface, which the
@@ -1108,6 +1116,7 @@ Some providers call common desktop tools when available:
 - `wl-clipboard` for clipboard text/image capture, and for putting screenshots on the clipboard.
 - `grim` and `slurp` for screenshots and region selection.
 - `wf-recorder` for screen recording.
+- `hyprsunset`, `gammastep` or `wlsunset` for night mode.
 - `nix` for flake update checking, and a terminal for the update and rebuild actions.
 - `libnotify` for `notify-send`, which announces a finished capture.
 - `tesseract` for OCR, both on clipboard images and on `capture.ocr`.

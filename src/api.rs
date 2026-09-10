@@ -18,7 +18,7 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{awake, capture, compositor, hardware, localsend, nix, power, tailscale};
+use crate::{awake, capture, compositor, hardware, localsend, night, nix, power, tailscale};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -398,6 +398,23 @@ const SYSTEM: &[Method] = &[
     ),
     method("updateFirmware", "Start fwupdmgr update in a terminal", &[]),
     method(
+        "nightLight",
+        "Whether the screen is being warmed, and to what",
+        &[],
+    ),
+    method(
+        "setNightLight",
+        "Warm the screen, or hand it back",
+        &[
+            ("enabled", "optional bool; omit to toggle"),
+            (
+                "temperature",
+                "optional kelvin, defaulting to night_light_temperature",
+            ),
+            ("notify", "optional bool, defaulting to true"),
+        ],
+    ),
+    method(
         "setStayAwake",
         "Hold the machine awake, or let it idle again",
         &[
@@ -461,6 +478,7 @@ const ALWAYS_ANSWERS: &[&str] = &[
     "nix.status",
     "system.stayAwake",
     "system.hardware",
+    "system.nightLight",
 ];
 
 /// A group's availability is decided at call time, not at startup: a compositor can be restarted
@@ -831,6 +849,18 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
         ("system", "updateFirmware") => {
             let command = hardware::update_firmware().map_err(backend_error)?;
             Ok(json!({ "started": true, "command": command }))
+        }
+        ("system", "nightLight") => value(night::status()),
+        ("system", "setNightLight") => {
+            let temperature = params
+                .get("temperature")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32);
+            let notify = param_bool(params, "notify").unwrap_or(true);
+            value(
+                night::set(param_bool(params, "enabled"), temperature, notify)
+                    .map_err(backend_error)?,
+            )
         }
         ("system", "stayAwake") => value(awake::status()),
         ("system", "setStayAwake") => {

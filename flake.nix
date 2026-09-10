@@ -80,6 +80,8 @@
         screenshot_notify = true;
         # Language capture.ocr reads with; join several with "+" (e.g. "eng+deu").
         ocr_language = "eng";
+        # Night mode. Lower is warmer; 6500 is neutral daylight.
+        night_light_temperature = 4000;
         recording_dir = "~/Videos/Recordings";
         recording_filename = "recording-%Y%m%d-%H%M%S.mp4";
         recording_notify = true;
@@ -153,6 +155,10 @@
           slurp
           wf-recorder
           libnotify
+          # Night mode holds a wlr-gamma-control object for as long as it runs. hyprsunset works
+          # on niri too, which implements the same protocol; gammastep is the fallback.
+          hyprsunset
+          gammastep
         ];
     in
     {

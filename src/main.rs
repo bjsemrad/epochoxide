@@ -9,6 +9,7 @@ mod hardware;
 mod history;
 mod icons;
 mod localsend;
+mod night;
 mod nix;
 mod notify;
 mod power;
@@ -112,6 +113,7 @@ fn main() -> Result<()> {
     capture::configure(&config);
     nix::configure(&config);
     hardware::configure(&config);
+    night::configure(&config);
 
     match cli.command {
         Command::Serve { socket } => {

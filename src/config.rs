@@ -74,6 +74,9 @@ pub struct Config {
     /// What `nix.rebuild` runs. Empty by default: guessing a rebuild command means running the
     /// wrong one on someone's machine. `%HOST%` is replaced with the host being rebuilt.
     pub nix_rebuild_command: String,
+    /// Colour temperature night mode warms the screen to, in kelvin. Lower is warmer; 6500 is
+    /// neutral daylight.
+    pub night_light_temperature: u32,
     /// Hosts to offer a rebuild for, each with the command that rebuilds it. Empty reads the
     /// names from the flake's `nixosConfigurations` and falls back to `nix_rebuild_command`.
     pub nix_hosts: Vec<NixHost>,
@@ -150,6 +153,7 @@ struct PartialConfig {
     nix_update_command: Option<String>,
     nix_rebuild_command: Option<String>,
     nix_hosts: Option<Vec<NixHost>>,
+    night_light_temperature: Option<u32>,
     nix_notify: Option<bool>,
     clipboard_capture_interval_ms: Option<u64>,
     runner_scan_path: Option<bool>,
@@ -202,6 +206,7 @@ impl Default for Config {
             nix_update_command: "nix flake update".into(),
             nix_rebuild_command: String::new(),
             nix_hosts: Vec::new(),
+            night_light_temperature: 4000,
             nix_notify: true,
             clipboard_capture_interval_ms: 250,
             runner_scan_path: true,
@@ -325,6 +330,9 @@ impl Config {
         }
         if let Some(v) = partial.nix_hosts {
             cfg.nix_hosts = v;
+        }
+        if let Some(v) = partial.night_light_temperature {
+            cfg.night_light_temperature = v;
         }
         if let Some(v) = partial.nix_notify {
             cfg.nix_notify = v;

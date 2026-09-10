@@ -28,6 +28,12 @@ keywords = ["nix", "flake", "update", "lock"]
 # keywords = ["nix", "rebuild", "switch"]
 
 [[entries]]
+text = "Night mode"
+subtext = "Toggle: warm the screen"
+value = "epochctl toggle night-light"
+keywords = ["night", "warm", "blue", "light", "sunset", "gamma", "evening"]
+
+[[entries]]
 text = "Stay awake"
 subtext = "Toggle: hold the machine out of idle and sleep"
 value = "epochctl toggle stay-awake"
