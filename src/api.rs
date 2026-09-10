@@ -18,7 +18,7 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{awake, capture, compositor, localsend, nix, power, tailscale};
+use crate::{awake, capture, compositor, hardware, localsend, nix, power, tailscale};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -387,6 +387,16 @@ const SYSTEM: &[Method] = &[
         &[],
     ),
     method(
+        "hardware",
+        "What machine this is, and how its battery has worn",
+        &[],
+    ),
+    method(
+        "firmware",
+        "Firmware updates fwupd is offering",
+        &[("refresh", "optional bool; skip the cached answer")],
+    ),
+    method(
         "setStayAwake",
         "Hold the machine awake, or let it idle again",
         &[
@@ -449,6 +459,7 @@ const ALWAYS_ANSWERS: &[&str] = &[
     "capture.recording",
     "nix.status",
     "system.stayAwake",
+    "system.hardware",
 ];
 
 /// A group's availability is decided at call time, not at startup: a compositor can be restarted
@@ -811,6 +822,11 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
         }
         ("capture", "recording") => value(capture::recording().map_err(backend_error)?),
         ("system", "power") => value(power::status()),
+        ("system", "hardware") => value(hardware::status()),
+        ("system", "firmware") => value(
+            hardware::firmware(param_bool(params, "refresh").unwrap_or(false))
+                .map_err(backend_error)?,
+        ),
         ("system", "stayAwake") => value(awake::status()),
         ("system", "setStayAwake") => {
             let reason = params.get("reason").and_then(Value::as_str);

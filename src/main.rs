@@ -5,6 +5,7 @@ mod client;
 mod compositor;
 mod config;
 mod fuzzy;
+mod hardware;
 mod history;
 mod icons;
 mod localsend;

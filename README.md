@@ -24,6 +24,7 @@ It runs as a small user daemon, keeps common desktop data warm in memory, and ex
 - Screen recording of a region, a window, or a monitor, with the daemon owning the recorder.
 - Nix flake update awareness: what could move, checked without writing to your flake.
 - CPU power state -- profile, governor, energy preference, turbo -- read from sysfs.
+- Machine identity, battery wear, and the firmware updates fwupd is offering.
 - Versioned Epoch API for normalized compositor state and Tailscale, independent of the launcher.
 
 ## Why
@@ -513,7 +514,7 @@ contract version: 1.0
   localsend    available    9 methods
   dev          planned      0 methods   not implemented in this build
   nix          available    5 methods
-  system       available    1 method
+  system       available    5 methods
 ```
 
 Groups marked `planned` are part of the contract but not implemented; they answer with
@@ -827,6 +828,33 @@ loud.
 `manager` names the daemon deciding it -- `auto-cpufreq`, `power-profiles-daemon`, `tuned`, or
 nothing. It is reported rather than depended on: the numbers are true whether or not anything is
 managing them.
+
+```bash
+epochoxide api system.hardware
+epochoxide api system.firmware
+epochoxide api system.firmware --params '{"refresh":true}'
+epochoxide api system.stayAwake
+epochoxide api system.setStayAwake --params '{"enabled":true,"reason":"presentation"}'
+```
+
+`hardware` names the machine from DMI and reports how the battery has worn -- full charge now
+against full charge when new, plus the cycle count. That is the number nobody's desktop shows and
+everybody wants, and it needs no vendor support: `framework: true` exists so a caller can say
+"Framework Laptop 13" rather than to gate anything behind it.
+
+Charge thresholds are reported when a machine exposes them through sysfs
+(`charge_control_end_threshold`). Framework's live in the embedded controller behind
+`/dev/cros_ec`, which is root-only, so they come back null there rather than behind a polkit prompt
+for reading a number.
+
+`firmware` asks fwupd what it is offering, cached for ten minutes because `fwupdmgr` talks to a
+daemon and firmware does not change faster than that. It never downloads metadata and never
+installs anything: flashing firmware is the user's own `fwupdmgr update`.
+
+`setStayAwake` holds the machine out of idle and sleep by keeping a `systemd-inhibit` process
+alive; omitting `enabled` toggles. Everything that idles a session watches logind, so that is where
+the lock is taken -- and the shell adds a Wayland idle-inhibit against its own surface, which the
+daemon cannot do because it has no surface.
 
 `can_switch` is false, and this build never changes a governor. Switching is a different problem:
 whatever daemon is managing the CPU puts its own decision back within seconds unless it is asked
