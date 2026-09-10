@@ -1,7 +1,7 @@
 name = "system"
 name_pretty = "System"
 description = "Updates, idle, and session actions"
-icon = "preferences-system"
+icon = "󰒓"
 
 # Most entries drive epochctl, so the launcher, a keybinding and a script all do the same thing.
 action = "%VALUE%"

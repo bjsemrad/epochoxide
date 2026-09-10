@@ -1,7 +1,7 @@
 name = "capture"
 name_pretty = "Capture"
 description = "Take a screenshot"
-icon = "camera-photo"
+icon = "󰄀"
 
 # Every entry is a mode `epochctl capture screenshot` already understands, so the launcher, a
 # keybinding, and a script all take the same picture.
