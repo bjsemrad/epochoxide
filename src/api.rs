@@ -396,6 +396,7 @@ const SYSTEM: &[Method] = &[
         "Firmware updates fwupd is offering",
         &[("refresh", "optional bool; skip the cached answer")],
     ),
+    method("updateFirmware", "Start fwupdmgr update in a terminal", &[]),
     method(
         "setStayAwake",
         "Hold the machine awake, or let it idle again",
@@ -827,6 +828,10 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
             hardware::firmware(param_bool(params, "refresh").unwrap_or(false))
                 .map_err(backend_error)?,
         ),
+        ("system", "updateFirmware") => {
+            let command = hardware::update_firmware().map_err(backend_error)?;
+            Ok(json!({ "started": true, "command": command }))
+        }
         ("system", "stayAwake") => value(awake::status()),
         ("system", "setStayAwake") => {
             let reason = params.get("reason").and_then(Value::as_str);

@@ -15,8 +15,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// The terminal to run privileged, interactive commands in, taken from the daemon's own config.
+///
+/// It is stored at startup rather than read on demand: an API handler that reloads config from the
+/// default path ignores whatever the running daemon was actually started with, which is how a test
+/// against a stubbed terminal opened a real one and started a real firmware update.
+static TERMINAL: OnceLock<String> = OnceLock::new();
+
+pub fn configure(config: &crate::config::Config) {
+    let _ = TERMINAL.set(config.terminal_cmd.clone());
+}
+
+fn terminal() -> String {
+    TERMINAL.get().cloned().unwrap_or_default()
+}
 
 const DMI: &str = "/sys/class/dmi/id";
 const POWER_SUPPLY: &str = "/sys/class/power_supply";
@@ -28,6 +43,8 @@ pub struct Hardware {
     pub family: String,
     pub board: String,
     pub bios_version: String,
+    /// The running kernel, from /proc.
+    pub kernel: String,
     /// True when DMI says Framework, so a caller can offer vendor-specific help without guessing.
     pub framework: bool,
     pub battery: Option<Battery>,
@@ -80,6 +97,7 @@ pub fn status() -> Hardware {
         family: dmi("product_family"),
         board: dmi("board_name"),
         bios_version: dmi("bios_version"),
+        kernel: read("/proc/sys/kernel/osrelease"),
         vendor,
         battery: battery(),
     }
@@ -232,6 +250,18 @@ pub fn firmware(refresh: bool) -> Result<Firmware> {
         *cache = Some((Instant::now(), answer.clone()));
     }
     Ok(answer)
+}
+
+/// Start `fwupdmgr update` in a terminal.
+///
+/// In a terminal because it asks for a password through polkit, lists what it is about to flash,
+/// and often ends by asking for a reboot -- none of which can happen behind a panel. Nothing here
+/// flashes anything itself; it opens the tool and gets out of the way.
+pub fn update_firmware() -> Result<String> {
+    if let Err(reason) = firmware_available() {
+        bail!("{reason}");
+    }
+    crate::terminal::run("fwupdmgr update", None, &terminal())
 }
 
 fn string(value: &Value, key: &str) -> String {

@@ -16,6 +16,7 @@ mod providers;
 mod server;
 mod service;
 mod tailscale;
+mod terminal;
 mod types;
 
 use anyhow::Result;
@@ -110,6 +111,7 @@ fn main() -> Result<()> {
     // in-process when no daemon is running, so they are installed before either path runs.
     capture::configure(&config);
     nix::configure(&config);
+    hardware::configure(&config);
 
     match cli.command {
         Command::Serve { socket } => {

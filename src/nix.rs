@@ -620,86 +620,9 @@ fn run_in_terminal(settings: &Settings, command: &str, key: &str) -> Result<Stri
     if !settings.configured() {
         bail!("no flake configured (set nix_flake)");
     }
-    let terminal = if settings.terminal.trim().is_empty() {
-        default_terminal().ok_or_else(|| {
-            anyhow!("no terminal found; set terminal_cmd to the terminal to run this in")
-        })?
-    } else {
-        settings.terminal.clone()
-    };
-
-    // The command runs in the flake's directory, which is what makes `--flake .#host` and a bare
-    // `nix flake update` mean what the user expects. It is then held open: a rebuild takes minutes
-    // and prints the only record of what it did, and a terminal that vanishes on the last line
-    // takes that with it.
-    let script = format!(
-        "cd {} && {command}\nstatus=$?\nprintf '\\n[exited %s] press enter to close ' \"$status\"\nread _",
-        shell_quote(&settings.flake)
-    );
-    // Through the user's own shell, interactively, because a rebuild command is usually an alias
-    // -- `nixswitch`, `rebuild-thor` -- and aliases live in the shell's rc file. `sh -c` would
-    // report "command not found" for something the user runs by hand every day.
-    let shell = user_shell();
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "{terminal} {shell} -i -c {}",
-            shell_quote_str(&script)
-        ))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .with_context(|| format!("running {terminal}"))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(command.to_string())
-}
-
-/// The user's login shell, which is where their aliases are defined.
-fn user_shell() -> String {
-    if let Ok(shell) = std::env::var("SHELL") {
-        if !shell.trim().is_empty() {
-            return shell;
-        }
-    }
-    // A systemd user service does not always inherit SHELL, so passwd is the fallback.
-    let user = std::env::var("USER").unwrap_or_default();
-    if !user.is_empty() {
-        if let Some(line) = Command::new("getent")
-            .args(["passwd", &user])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        {
-            if let Some(shell) = line.rsplit(':').next() {
-                if !shell.is_empty() {
-                    return shell.to_string();
-                }
-            }
-        }
-    }
-    "sh".to_string()
-}
-
-fn default_terminal() -> Option<String> {
-    for candidate in ["ghostty", "kitty", "alacritty", "foot", "wezterm", "xterm"] {
-        if which::which(candidate).is_ok() {
-            // Every one of these takes the command after -e.
-            return Some(format!("{candidate} -e"));
-        }
-    }
-    None
-}
-
-fn shell_quote(path: &Path) -> String {
-    shell_quote_str(&path.display().to_string())
-}
-
-fn shell_quote_str(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+    // From the flake's directory, which is what makes `--flake .#host` and a bare `nix flake
+    // update` mean what the user expects.
+    crate::terminal::run(command, Some(&settings.flake), &settings.terminal)
 }
 
 /// Start the background checker. Does nothing when no flake is configured or the interval is zero.
