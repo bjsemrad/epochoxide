@@ -1,0 +1,84 @@
+name = "themes"
+name_pretty = "Themes"
+description = "Switch the shell palette"
+icon = "󰏘"
+
+# Each entry runs epochctl, so the launcher, a keybinding and a script all take the same path --
+# and all of them end up writing the same state file the shell is watching.
+action = "%VALUE%"
+
+# One entry per shipped theme. These cannot be generated from what is installed, so a theme added
+# under ~/.local/share/epochshell/themes wants a line here too -- or just use the picker in the
+# system menu, which builds itself from disk. `epochctl theme list` is the authority on what exists.
+
+[[entries]]
+text = "Dark"
+subtext = "The default palette"
+value = "epochctl theme set dark"
+keywords = ["theme", "palette", "colour", "color", "dark", "default", "night"]
+
+[[entries]]
+text = "Light"
+subtext = "Plain white ground"
+value = "epochctl theme set light"
+keywords = ["theme", "palette", "colour", "color", "light", "day", "bright", "white"]
+
+[[entries]]
+text = "Gruvbox"
+subtext = "Warm retro browns and orange"
+value = "epochctl theme set gruvbox"
+keywords = ["theme", "palette", "colour", "color", "gruvbox", "retro", "warm", "brown"]
+
+[[entries]]
+text = "Catppuccin Mocha"
+subtext = "Violet-tinted dark"
+value = "epochctl theme set catppuccin-mocha"
+keywords = ["theme", "palette", "colour", "color", "catppuccin", "mocha", "violet", "purple"]
+
+[[entries]]
+text = "Catppuccin Latte"
+subtext = "Warm light"
+value = "epochctl theme set catppuccin-latte"
+keywords = ["theme", "palette", "colour", "color", "catppuccin", "latte", "light", "warm"]
+
+[[entries]]
+text = "Tokyo Night"
+subtext = "Deep blue-black"
+value = "epochctl theme set tokyo-night"
+keywords = ["theme", "palette", "colour", "color", "tokyo", "night", "blue"]
+
+[[entries]]
+text = "Nord"
+subtext = "Muted arctic blue-greys"
+value = "epochctl theme set nord"
+keywords = ["theme", "palette", "colour", "color", "nord", "arctic", "blue", "muted"]
+
+[[entries]]
+text = "Rose Pine"
+subtext = "Soft and desaturated"
+value = "epochctl theme set rose-pine"
+keywords = ["theme", "palette", "colour", "color", "rose", "pine", "soft", "iris"]
+
+[[entries]]
+text = "Everforest"
+subtext = "Green-grey and warm"
+value = "epochctl theme set everforest"
+keywords = ["theme", "palette", "colour", "color", "everforest", "green", "forest"]
+
+[[entries]]
+text = "Dracula"
+subtext = "High-saturation slate"
+value = "epochctl theme set dracula"
+keywords = ["theme", "palette", "colour", "color", "dracula", "purple", "slate"]
+
+[[entries]]
+text = "Kanagawa"
+subtext = "Ink-dark and warm"
+value = "epochctl theme set kanagawa"
+keywords = ["theme", "palette", "colour", "color", "kanagawa", "ink", "dark", "wave"]
+
+[[entries]]
+text = "Reset theme"
+subtext = "Forget the pick and go back to the configured default"
+value = "epochctl theme reset"
+keywords = ["theme", "reset", "default", "palette"]
