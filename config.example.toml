@@ -42,7 +42,12 @@ recording_dir = "~/Videos/Recordings"
 # Where the wallpaper switcher looks. Searched two levels deep for jpg, jpeg, png and webp,
 # following symlinks -- without which a home-manager wallpaper directory scans as empty, since
 # everything in it is a link into the nix store.
-wallpaper_dirs = ["~/.config/hypr"]
+wallpaper_dirs = [
+  "~/.config/hypr",
+  "~/Pictures/Wallpapers",
+  "~/Wallpapers",
+  "~/.local/share/wallpapers",
+]
 recording_filename = "recording-%Y%m%d-%H%M%S.mp4"
 recording_notify = true
 # A constant framerate is what keeps the file playable: left to time itself, wf-recorder declares

@@ -201,9 +201,20 @@ impl Default for Config {
             screenshot_notify: true,
             ocr_language: "eng".into(),
             recording_dir: home.join("Videos/Recordings").display().to_string(),
-            // Where this machine actually keeps wallpapers. A home-manager install fills
-            // ~/.config/hypr with symlinks into the store, which is why the scan follows them.
-            wallpaper_dirs: vec![home.join(".config/hypr").display().to_string()],
+            // ~/.config/hypr first, because that is where a hyprpaper setup actually keeps them --
+            // a home-manager install fills it with symlinks into the store, which is why the scan
+            // follows them. The rest are the conventional spots, listed so dropping images into any
+            // of them just works; a directory that does not exist is skipped without complaint.
+            //
+            // Deliberately NOT ~/Pictures itself. The scan goes two levels deep, so that would pull
+            // in ~/Pictures/Screenshots and bury the real wallpapers under every screenshot ever
+            // taken. ~/Pictures/Wallpapers is the version of that which is safe to assume.
+            wallpaper_dirs: vec![
+                home.join(".config/hypr").display().to_string(),
+                home.join("Pictures/Wallpapers").display().to_string(),
+                home.join("Wallpapers").display().to_string(),
+                home.join(".local/share/wallpapers").display().to_string(),
+            ],
             recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
             recording_notify: true,
             recording_framerate: 30,
