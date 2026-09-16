@@ -39,6 +39,7 @@ pub struct Wallpaper {
     /// What is on screen, as far as this daemon knows -- which is the only thing that does.
     pub current: String,
     pub directories: Vec<String>,
+    pub fit_mode: String,
     pub available: bool,
     pub unavailable_reason: Option<String>,
 }
@@ -49,9 +50,11 @@ static CURRENT: Mutex<Option<String>> = Mutex::new(None);
 /// Installed once at startup, the way night mode's temperature is: `dispatch` has no registry to
 /// read a config out of, so the settings this module needs are put somewhere it can reach.
 static DIRECTORIES: OnceLock<Vec<String>> = OnceLock::new();
+static FIT_MODE: OnceLock<String> = OnceLock::new();
 
 pub fn configure(config: &Config) {
     let _ = DIRECTORIES.set(config.wallpaper_dirs.clone());
+    let _ = FIT_MODE.set(config.wallpaper_fit_mode.clone());
 }
 
 fn directories() -> Vec<String> {
@@ -59,6 +62,13 @@ fn directories() -> Vec<String> {
         .get()
         .cloned()
         .unwrap_or_else(|| Config::default().wallpaper_dirs)
+}
+
+fn fit_mode() -> String {
+    FIT_MODE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| Config::default().wallpaper_fit_mode)
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -146,10 +156,22 @@ pub fn available() -> Result<(), String> {
     }
 }
 
-/// Ask hyprpaper to switch. Empty monitor means every output.
+/// Ask hyprpaper to switch.
+///
+/// The request is `monitor,path,fit_mode` -- three comma-separated fields. An empty monitor means
+/// every output. The fit mode has to travel with the switch: hyprpaper's config carries one per
+/// declared wallpaper, so an image set over IPC inherits nothing and would be fitted by whatever
+/// the default happens to be.
+///
+/// Worth knowing if this ever looks wrong: the mode is NOT a prefix on the path. `contain:/foo.jpg`
+/// is rejected as a bad path, which is an easy thing to reach for and an easy error to misread.
 fn apply(path: &str) -> Result<()> {
     let output = Command::new("hyprctl")
-        .args(["hyprpaper", "wallpaper", &format!(",{path}")])
+        .args([
+            "hyprpaper",
+            "wallpaper",
+            &format!(",{path},{}", fit_mode()),
+        ])
         .output()?;
 
     // hyprctl exits 0 and says nothing on success; anything on stdout is the failure.
@@ -167,6 +189,7 @@ pub fn status() -> Wallpaper {
     Wallpaper {
         current: current(),
         directories: directories(),
+        fit_mode: fit_mode(),
         unavailable_reason: (!available).then(|| "hyprctl is not installed".to_string()),
         available,
         wallpapers,

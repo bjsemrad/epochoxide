@@ -61,6 +61,9 @@ pub struct Config {
     pub recording_dir: String,
     /// Directories the wallpaper switcher looks in, searched two levels deep for images.
     pub wallpaper_dirs: Vec<String>,
+    /// How hyprpaper fits an image to the output. Only "cover" and "contain" exist in hyprpaper
+    /// 0.8; anything else is passed through and refused by it.
+    pub wallpaper_fit_mode: String,
     /// Name for a recording, expanded by `date`. The extension picks the container wf-recorder
     /// writes, so `.mp4` and `.mkv` both work.
     pub recording_filename: String,
@@ -148,6 +151,7 @@ struct PartialConfig {
     ocr_language: Option<String>,
     recording_dir: Option<String>,
     wallpaper_dirs: Option<Vec<String>>,
+    wallpaper_fit_mode: Option<String>,
     recording_filename: Option<String>,
     recording_notify: Option<bool>,
     recording_framerate: Option<u32>,
@@ -215,6 +219,9 @@ impl Default for Config {
                 home.join("Wallpapers").display().to_string(),
                 home.join(".local/share/wallpapers").display().to_string(),
             ],
+            // Fill the output and crop the overflow, which is what most people mean by a
+            // wallpaper "fitting". `contain` is the other option and letterboxes instead.
+            wallpaper_fit_mode: "cover".into(),
             recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
             recording_notify: true,
             recording_framerate: 30,
@@ -323,6 +330,9 @@ impl Config {
         }
         if let Some(v) = partial.wallpaper_dirs {
             cfg.wallpaper_dirs = v;
+        }
+        if let Some(v) = partial.wallpaper_fit_mode {
+            cfg.wallpaper_fit_mode = v;
         }
         if let Some(v) = partial.recording_dir {
             cfg.recording_dir = v;
