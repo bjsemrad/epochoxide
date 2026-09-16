@@ -18,7 +18,7 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{awake, capture, compositor, hardware, localsend, night, nix, power, tailscale};
+use crate::{awake, capture, compositor, hardware, localsend, night, nix, power, tailscale, wallpaper};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -425,6 +425,24 @@ const SYSTEM: &[Method] = &[
     ),
 ];
 
+const WALLPAPER: &[Method] = &[
+    method(
+        "status",
+        "Every image found, which is current, and where it looked",
+        &[],
+    ),
+    method(
+        "set",
+        "Switch to a wallpaper by path",
+        &[("path", "path to an image, as listed by wallpaper.status")],
+    ),
+    method(
+        "next",
+        "Step through the list without naming a path",
+        &[("step", "optional signed int, defaulting to 1; -1 goes back")],
+    ),
+];
+
 const GROUPS: &[Group] = &[
     Group {
         name: "compositor",
@@ -463,6 +481,11 @@ const GROUPS: &[Group] = &[
         summary: "Power profiles and system state",
         methods: SYSTEM,
     },
+    Group {
+        name: "wallpaper",
+        summary: "The desktop wallpaper: what is on it, and what could be",
+        methods: WALLPAPER,
+    },
 ];
 
 /// Methods that answer even when their group is not available here.
@@ -479,6 +502,7 @@ const ALWAYS_ANSWERS: &[&str] = &[
     "system.stayAwake",
     "system.hardware",
     "system.nightLight",
+    "wallpaper.status",
 ];
 
 /// A group's availability is decided at call time, not at startup: a compositor can be restarted
@@ -505,6 +529,10 @@ fn availability(group: &str) -> Availability {
             Err(reason) => Availability::Unavailable(reason),
         },
         "capture" => match capture::available() {
+            Ok(()) => Availability::Available,
+            Err(reason) => Availability::Unavailable(reason),
+        },
+        "wallpaper" => match wallpaper::available() {
             Ok(()) => Availability::Available,
             Err(reason) => Availability::Unavailable(reason),
         },
@@ -849,6 +877,20 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
         ("system", "updateFirmware") => {
             let command = hardware::update_firmware().map_err(backend_error)?;
             Ok(json!({ "started": true, "command": command }))
+        }
+        ("wallpaper", "status") => value(wallpaper::status()),
+        ("wallpaper", "set") => {
+            let path = params
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| backend_error(anyhow::anyhow!("no wallpaper path given")))?;
+            value(wallpaper::set(path).map_err(backend_error)?)
+        }
+        ("wallpaper", "next") => {
+            // Signed, so one method covers both directions and a caller asking for -1 is not a
+            // second endpoint.
+            let step = params.get("step").and_then(Value::as_i64).unwrap_or(1);
+            value(wallpaper::step(step).map_err(backend_error)?)
         }
         ("system", "nightLight") => value(night::status()),
         ("system", "setNightLight") => {

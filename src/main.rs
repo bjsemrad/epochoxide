@@ -18,6 +18,7 @@ mod server;
 mod service;
 mod tailscale;
 mod terminal;
+mod wallpaper;
 mod types;
 
 use anyhow::Result;
@@ -114,6 +115,7 @@ fn main() -> Result<()> {
     nix::configure(&config);
     hardware::configure(&config);
     night::configure(&config);
+    wallpaper::configure(&config);
 
     match cli.command {
         Command::Serve { socket } => {
@@ -126,6 +128,10 @@ fn main() -> Result<()> {
             // Checking for flake updates is a background job with a timer, so it only runs under
             // the daemon; the one-shot CLI answers from whatever the daemon last found.
             nix::watch();
+            // Put back the wallpaper chosen last session, before anything draws. hyprpaper starts
+            // from its own config and knows nothing about the choice, so without this a reboot
+            // silently reverts it. Daemon-only: a one-shot CLI call should not repaint the desktop.
+            wallpaper::restore();
             if config.localsend_receive {
                 if let Err(err) = localsend::start_receiver() {
                     eprintln!("localsend: not accepting transfers: {err:#}");

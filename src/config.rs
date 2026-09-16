@@ -59,6 +59,8 @@ pub struct Config {
     pub ocr_language: String,
     /// Where `capture.record` writes. Created when the first recording starts.
     pub recording_dir: String,
+    /// Directories the wallpaper switcher looks in, searched two levels deep for images.
+    pub wallpaper_dirs: Vec<String>,
     /// Name for a recording, expanded by `date`. The extension picks the container wf-recorder
     /// writes, so `.mp4` and `.mkv` both work.
     pub recording_filename: String,
@@ -145,6 +147,7 @@ struct PartialConfig {
     screenshot_notify: Option<bool>,
     ocr_language: Option<String>,
     recording_dir: Option<String>,
+    wallpaper_dirs: Option<Vec<String>>,
     recording_filename: Option<String>,
     recording_notify: Option<bool>,
     recording_framerate: Option<u32>,
@@ -198,6 +201,9 @@ impl Default for Config {
             screenshot_notify: true,
             ocr_language: "eng".into(),
             recording_dir: home.join("Videos/Recordings").display().to_string(),
+            // Where this machine actually keeps wallpapers. A home-manager install fills
+            // ~/.config/hypr with symlinks into the store, which is why the scan follows them.
+            wallpaper_dirs: vec![home.join(".config/hypr").display().to_string()],
             recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
             recording_notify: true,
             recording_framerate: 30,
@@ -304,6 +310,9 @@ impl Config {
         if let Some(v) = partial.ocr_language {
             cfg.ocr_language = v;
         }
+        if let Some(v) = partial.wallpaper_dirs {
+            cfg.wallpaper_dirs = v;
+        }
         if let Some(v) = partial.recording_dir {
             cfg.recording_dir = v;
         }
@@ -381,6 +390,7 @@ impl Config {
         self.clipboard_image_dir = expand(&self.clipboard_image_dir);
         self.screenshot_dir = expand(&self.screenshot_dir);
         self.recording_dir = expand(&self.recording_dir);
+        self.wallpaper_dirs = self.wallpaper_dirs.iter().map(|p| expand(p)).collect();
         self.nix_flake = expand(&self.nix_flake);
         self.icon_cache_dir = expand(&self.icon_cache_dir);
     }

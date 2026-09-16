@@ -78,6 +78,48 @@ value = "epochctl theme set kanagawa"
 keywords = ["theme", "palette", "colour", "color", "kanagawa", "ink", "dark", "wave"]
 
 [[entries]]
+text = "One Dark"
+subtext = "The palette dark is derived from"
+value = "epochctl theme set one-dark"
+keywords = ["theme", "palette", "colour", "color", "one", "onedark", "atom"]
+
+[[entries]]
+text = "Ayu Dark"
+subtext = "Near-black, vivid accent"
+value = "epochctl theme set ayu-dark"
+keywords = ["theme", "palette", "colour", "color", "ayu", "dark"]
+
+[[entries]]
+text = "Material Ocean"
+subtext = "Deep blue-black, soft text"
+value = "epochctl theme set material-ocean"
+keywords = ["theme", "palette", "colour", "color", "material", "ocean", "blue"]
+
+[[entries]]
+text = "Flexoki Dark"
+subtext = "Warm-neutral near-black"
+value = "epochctl theme set flexoki-dark"
+keywords = ["theme", "palette", "colour", "color", "flexoki", "warm", "ink"]
+
+[[entries]]
+text = "Monokai"
+subtext = "High chroma on warm olive"
+value = "epochctl theme set monokai"
+keywords = ["theme", "palette", "colour", "color", "monokai", "chroma", "olive"]
+
+[[entries]]
+text = "Solarized Dark"
+subtext = "Teal surfaces"
+value = "epochctl theme set solarized-dark"
+keywords = ["theme", "palette", "colour", "color", "solarized", "teal"]
+
+[[entries]]
+text = "Solarized Light"
+subtext = "Cream ground"
+value = "epochctl theme set solarized-light"
+keywords = ["theme", "palette", "colour", "color", "solarized", "light", "cream"]
+
+[[entries]]
 text = "Reset theme"
 subtext = "Forget the pick and go back to the configured default"
 value = "epochctl theme reset"
