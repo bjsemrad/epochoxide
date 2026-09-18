@@ -48,6 +48,11 @@ Build from source:
 cargo build --release
 ```
 
+On Nix, `nix develop` gives you that plus every tool the daemon shells out to at runtime — grim,
+slurp, wf-recorder, tesseract, wl-clipboard, fd, libqalculate, hyprsunset and the rest — so capture,
+clipboard, OCR, file search and night mode can be exercised from the checkout rather than only from
+an installed deployment. The list is the same one the home-manager and NixOS modules install.
+
 Run the daemon manually:
 
 ```bash

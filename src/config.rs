@@ -61,8 +61,13 @@ pub struct Config {
     pub recording_dir: String,
     /// Directories the wallpaper switcher looks in, searched two levels deep for images.
     pub wallpaper_dirs: Vec<String>,
-    /// How hyprpaper fits an image to the output. Only "cover" and "contain" exist in hyprpaper
-    /// 0.8; anything else is passed through and refused by it.
+    /// How hyprpaper fits an image to the output. This is sent over hyprctl, which understands
+    /// "contain", "tile", "stretch"/"fit", and quietly treats everything else as "cover" -- so a
+    /// mode it does not know is not an error here, it is a wallpaper that ignored the setting.
+    ///
+    /// Note that hyprpaper.conf speaks a different dialect: its `fit_mode = fill` is this
+    /// "stretch", and there is no `fill` over IPC at all. Matching a hand-written hyprpaper.conf
+    /// means translating, not copying.
     pub wallpaper_fit_mode: String,
     /// Name for a recording, expanded by `date`. The extension picks the container wf-recorder
     /// writes, so `.mp4` and `.mkv` both work.
@@ -219,9 +224,12 @@ impl Default for Config {
                 home.join("Wallpapers").display().to_string(),
                 home.join(".local/share/wallpapers").display().to_string(),
             ],
-            // Fill the output and crop the overflow, which is what most people mean by a
-            // wallpaper "fitting". `contain` is the other option and letterboxes instead.
-            wallpaper_fit_mode: "cover".into(),
+            // Fill the output edge to edge, aspect ratio be damned: the IPC spelling of the
+            // `fit_mode = fill` that hyprpaper.conf files tend to carry, so a switch looks like
+            // the wallpaper hyprpaper started with rather than changing how it is fitted. A
+            // switch carries its own mode and inherits nothing from that config, so whatever
+            // this says wins from the first switch of the session onwards.
+            wallpaper_fit_mode: "stretch".into(),
             recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
             recording_notify: true,
             recording_framerate: 30,

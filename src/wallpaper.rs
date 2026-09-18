@@ -52,9 +52,24 @@ static CURRENT: Mutex<Option<String>> = Mutex::new(None);
 static DIRECTORIES: OnceLock<Vec<String>> = OnceLock::new();
 static FIT_MODE: OnceLock<String> = OnceLock::new();
 
+/// Fit modes hyprctl parses. Everything else it takes as "cover" without saying so, which makes
+/// a misspelling indistinguishable from the setting having no effect -- worth one line at startup.
+const FIT_MODES: &[&str] = &["cover", "contain", "tile", "stretch", "fit"];
+
 pub fn configure(config: &Config) {
     let _ = DIRECTORIES.set(config.wallpaper_dirs.clone());
-    let _ = FIT_MODE.set(config.wallpaper_fit_mode.clone());
+    let wanted = config.wallpaper_fit_mode.clone();
+    if !FIT_MODES.contains(&wanted.as_str()) {
+        let hint = if wanted == "fill" {
+            // The one that is worth naming: hyprpaper.conf's own fit_mode spells this "fill",
+            // so copying that file's value across is the obvious thing to do and silently wrong.
+            " (hyprpaper.conf's `fill` is `stretch` here)"
+        } else {
+            ""
+        };
+        eprintln!("wallpaper: unknown fit mode {wanted:?}, hyprpaper will use \"cover\"{hint}");
+    }
+    let _ = FIT_MODE.set(wanted);
 }
 
 fn directories() -> Vec<String> {

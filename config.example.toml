@@ -48,6 +48,16 @@ wallpaper_dirs = [
   "~/Wallpapers",
   "~/.local/share/wallpapers",
 ]
+# How hyprpaper fits an image to the output: "cover" crops the overflow, "contain" letterboxes,
+# "tile" repeats, and "stretch" (also spelled "fit") fills the output edge to edge and distorts
+# the aspect ratio to do it. Anything hyprctl does not recognise is quietly taken as "cover", so a
+# mode that looks ignored is usually a mode that was misspelled.
+#
+# hyprpaper.conf spells that last one `fit_mode = fill`, and has no "stretch"; hyprctl has no
+# "fill". To make switching look like the wallpaper hyprpaper booted with, translate rather than
+# copy. A switch inherits nothing from hyprpaper.conf, so this setting wins from the first switch
+# of the session onwards.
+wallpaper_fit_mode = "stretch"
 recording_filename = "recording-%Y%m%d-%H%M%S.mp4"
 recording_notify = true
 # A constant framerate is what keeps the file playable: left to time itself, wf-recorder declares
