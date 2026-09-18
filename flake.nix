@@ -179,6 +179,23 @@
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
       });
 
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
+          packages =
+            (with pkgs; [
+              cargo
+              rustc
+              clippy
+              rustfmt
+            ])
+            # The daemon shells out to these rather than linking anything: without them a dev
+            # shell can build EpochOxide but not exercise capture, clipboard, OCR, file search
+            # or night mode, and those failures look like bugs rather than a missing tool.
+            # Sharing the module's list keeps a dev shell honest about what deployment installs.
+            ++ defaultRuntimePackages pkgs;
+        };
+      });
+
       homeManagerModules.default =
         {
           config,
