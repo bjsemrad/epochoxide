@@ -224,12 +224,18 @@ impl Default for Config {
                 home.join("Wallpapers").display().to_string(),
                 home.join(".local/share/wallpapers").display().to_string(),
             ],
-            // Fill the output edge to edge, aspect ratio be damned: the IPC spelling of the
-            // `fit_mode = fill` that hyprpaper.conf files tend to carry, so a switch looks like
-            // the wallpaper hyprpaper started with rather than changing how it is fitted. A
-            // switch carries its own mode and inherits nothing from that config, so whatever
-            // this says wins from the first switch of the session onwards.
-            wallpaper_fit_mode: "stretch".into(),
+            // Cover, because it is the only thing hyprpaper 0.8.4 will actually do here that
+            // fills the output. Stretch is unreachable over IPC in that version: hyprctl parses
+            // "stretch"/"fit" into the STRETCH enum, hyprpaper re-serialises that enum to the
+            // string "fit" (src/ipc/IPC.cpp), and its own parser only reads "fill" for stretch
+            // (src/ui/UI.cpp), so the value falls through to cover. Measured, not guessed --
+            // "stretch", "fit" and "fill" all render pixel-identical to "cover", while "contain"
+            // and "tile" differ. If hyprpaper is ever patched or fixed upstream, "stretch" here
+            // is the one word that needs changing back.
+            //
+            // Worth knowing when testing this by hand: hyprpaper only re-fits when the target
+            // changes, so re-sending the same image with a different mode does nothing at all.
+            wallpaper_fit_mode: "cover".into(),
             recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
             recording_notify: true,
             recording_framerate: 30,

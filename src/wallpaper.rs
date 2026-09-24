@@ -52,22 +52,26 @@ static CURRENT: Mutex<Option<String>> = Mutex::new(None);
 static DIRECTORIES: OnceLock<Vec<String>> = OnceLock::new();
 static FIT_MODE: OnceLock<String> = OnceLock::new();
 
-/// Fit modes hyprctl parses. Everything else it takes as "cover" without saying so, which makes
-/// a misspelling indistinguishable from the setting having no effect -- worth one line at startup.
-const FIT_MODES: &[&str] = &["cover", "contain", "tile", "stretch", "fit"];
+/// Fit modes that reach the screen as themselves. Everything else hyprpaper renders as "cover"
+/// without saying so, which makes a wrong value indistinguishable from the setting having no
+/// effect -- worth one line at startup rather than an afternoon with a screenshot and a hash.
+const FIT_MODES: &[&str] = &["cover", "contain", "tile"];
+
+/// Modes hyprctl accepts and hyprpaper 0.8.4 then quietly turns into "cover". They are worth
+/// naming separately: `fit_mode = fill` in a hyprpaper.conf really does stretch, so the reasonable
+/// assumption is that a switch can be made to match it, and it cannot.
+const FIT_MODES_LOST: &[&str] = &["stretch", "fit", "fill"];
 
 pub fn configure(config: &Config) {
     let _ = DIRECTORIES.set(config.wallpaper_dirs.clone());
     let wanted = config.wallpaper_fit_mode.clone();
     if !FIT_MODES.contains(&wanted.as_str()) {
-        let hint = if wanted == "fill" {
-            // The one that is worth naming: hyprpaper.conf's own fit_mode spells this "fill",
-            // so copying that file's value across is the obvious thing to do and silently wrong.
-            " (hyprpaper.conf's `fill` is `stretch` here)"
+        let why = if FIT_MODES_LOST.contains(&wanted.as_str()) {
+            "hyprpaper 0.8.4 cannot stretch over IPC"
         } else {
-            ""
+            "not a fit mode"
         };
-        eprintln!("wallpaper: unknown fit mode {wanted:?}, hyprpaper will use \"cover\"{hint}");
+        eprintln!("wallpaper: {wanted:?}: {why}, hyprpaper will render \"cover\"");
     }
     let _ = FIT_MODE.set(wanted);
 }
