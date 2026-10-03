@@ -132,6 +132,7 @@ fn main() -> Result<()> {
             // from its own config and knows nothing about the choice, so without this a reboot
             // silently reverts it. Daemon-only: a one-shot CLI call should not repaint the desktop.
             wallpaper::restore();
+            wallpaper::defer_restarts();
             if config.localsend_receive {
                 if let Err(err) = localsend::start_receiver() {
                     eprintln!("localsend: not accepting transfers: {err:#}");

@@ -28,7 +28,9 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 /// Extensions worth offering. Deliberately short: these are things hyprpaper can actually load.
 const EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
@@ -168,6 +170,23 @@ fn scan() -> Vec<String> {
 /// The unit hyprpaper runs as. Restarting it is how a switch lands when its IPC is off.
 const HYPRPAPER_UNIT: &str = "hyprpaper.service";
 
+/// How long switching has to go quiet before hyprpaper is restarted. Clicking through the picker
+/// otherwise restarts it once per click, each one a flicker -- and enough of them inside systemd's
+/// start limit (5 in 10s) leaves the unit failed and the desktop with no wallpaper at all.
+const RESTART_SETTLE: Duration = Duration::from_millis(500);
+
+/// Whether restarts may be deferred. Only the daemon lives long enough to do one later; a one-shot
+/// CLI call that deferred would exit first and never restart anything.
+static DEFER_RESTARTS: AtomicBool = AtomicBool::new(false);
+
+/// Bumped by every switch. A deferred restart only goes ahead if no switch came after it.
+static RESTART_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Called by the daemon at startup: from here on, restarts wait for switching to settle.
+pub fn defer_restarts() {
+    DEFER_RESTARTS.store(true, Ordering::SeqCst);
+}
+
 /// How a switch reaches the screen. Decided per call rather than once at startup, because the
 /// daemon outlives a logout and the next session may be the other compositor.
 enum Backend {
@@ -258,7 +277,7 @@ fn apply(path: &str) -> Result<()> {
         Backend::Ipc => apply_ipc(path),
         Backend::Link(link) => {
             relink(&link, path)?;
-            restart_hyprpaper()
+            schedule_restart()
         }
     }
 }
@@ -292,20 +311,50 @@ fn relink(link: &Path, target: &str) -> Result<()> {
     Ok(())
 }
 
-fn unit_active() -> bool {
-    Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", HYPRPAPER_UNIT])
-        .status()
-        .is_ok_and(|s| s.success())
+/// Whether the unit is one a restart should touch. "failed" counts: that is exactly the state a
+/// run of restarts leaves behind, and restarting is what gets it out. Only "inactive" -- nobody
+/// started it this session -- is left alone.
+fn unit_running() -> bool {
+    let state = Command::new("systemctl")
+        .args(["--user", "show", "-p", "ActiveState", "--value", HYPRPAPER_UNIT])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    matches!(state.as_str(), "active" | "activating" | "reloading" | "failed")
+}
+
+/// Restart hyprpaper once switching settles, or straight away when nothing will be around later.
+/// Whether the unit is running is checked now, so that refusal still reaches the caller.
+fn schedule_restart() -> Result<()> {
+    if !unit_running() {
+        bail!("{HYPRPAPER_UNIT} is not running; the wallpaper will show when it starts");
+    }
+    let mine = RESTART_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    if !DEFER_RESTARTS.load(Ordering::SeqCst) {
+        return restart_hyprpaper();
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(RESTART_SETTLE);
+        if RESTART_GENERATION.load(Ordering::SeqCst) != mine {
+            return;
+        }
+        if let Err(err) = restart_hyprpaper() {
+            eprintln!("wallpaper: {err:#}");
+        }
+    });
+    Ok(())
 }
 
 /// Make hyprpaper read its config again. Only the systemd unit is restarted: a hyprpaper started
 /// some other way is not this daemon's to kill, and one it respawned itself would die with the
 /// daemon's cgroup.
+///
+/// `reset-failed` first clears systemd's start-rate counter, so steady switching -- each one past
+/// the settle time -- cannot add up to a unit systemd refuses to start again.
 fn restart_hyprpaper() -> Result<()> {
-    if !unit_active() {
-        bail!("{HYPRPAPER_UNIT} is not running; the wallpaper will show when it starts");
-    }
+    let _ = Command::new("systemctl")
+        .args(["--user", "reset-failed", HYPRPAPER_UNIT])
+        .status();
     let output = Command::new("systemctl")
         .args(["--user", "restart", HYPRPAPER_UNIT])
         .output()?;
@@ -381,7 +430,9 @@ pub fn restore() {
                 true
             } else {
                 relink(&link, &saved).is_ok() && {
-                    let _ = restart_hyprpaper();
+                    if unit_running() {
+                        let _ = restart_hyprpaper();
+                    }
                     true
                 }
             }
