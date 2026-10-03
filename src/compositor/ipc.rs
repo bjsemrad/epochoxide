@@ -39,15 +39,28 @@ pub fn run(command: &str) -> Result<()> {
 
 // --- Hyprland ---------------------------------------------------------------
 
-pub fn hypr_output(args: &[&str]) -> Option<String> {
+/// A `hyprctl` carrying the instance signature, for a daemon started without one in its
+/// environment.
+pub fn hyprctl() -> std::process::Command {
     let mut command = std::process::Command::new("hyprctl");
-    command.args(args);
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
         if let Some(sig) = hypr_signature() {
             command.env("HYPRLAND_INSTANCE_SIGNATURE", sig);
         }
     }
+    command
+}
+
+pub fn hypr_output(args: &[&str]) -> Option<String> {
+    let mut command = hyprctl();
+    command.args(args);
     output(command)
+}
+
+/// Whether a Hyprland is actually answering. The socket file alone proves nothing: one from a
+/// session that has since ended stays in the runtime directory, so this connects.
+pub fn hypr_running() -> bool {
+    hypr_ipc("version").is_some()
 }
 
 pub fn hypr_ipc(command: &str) -> Option<String> {

@@ -5,8 +5,13 @@
 //! has to be restored before anything else draws, which only something started at session time can
 //! do.
 //!
-//! Applied through `hyprctl hyprpaper wallpaper ",<path>"`, which hyprpaper 0.8 switches on with no
-//! reload. Two things about hyprpaper shape the rest of this file:
+//! Under Hyprland, applied through `hyprctl hyprpaper wallpaper ",<path>"`, which hyprpaper 0.8
+//! switches on with no reload. Anywhere else -- niri -- hyprpaper still draws, but it turns its IPC
+//! off at startup ("not running under hyprland, IPC will be disabled"), so nothing can switch it
+//! live. There the switch goes through hyprpaper's config instead: when that config points at a
+//! symlink, the link is repointed and hyprpaper restarted to read it again. See `Backend`.
+//!
+//! Two things about hyprpaper shape the rest of this file:
 //!
 //!   * Its `listactive` reports what was loaded at startup and does not follow a live switch, so it
 //!     cannot answer "what is set now". This module remembers instead.
@@ -160,19 +165,83 @@ fn scan() -> Vec<String> {
     found
 }
 
-fn hyprctl_available() -> bool {
-    which::which("hyprctl").is_ok()
+/// The unit hyprpaper runs as. Restarting it is how a switch lands when its IPC is off.
+const HYPRPAPER_UNIT: &str = "hyprpaper.service";
+
+/// How a switch reaches the screen. Decided per call rather than once at startup, because the
+/// daemon outlives a logout and the next session may be the other compositor.
+enum Backend {
+    /// Hyprland is running, so hyprpaper's IPC is up and a switch is instant.
+    Ipc,
+    /// hyprpaper's IPC is off, but its config draws from this symlink: repoint it and restart.
+    Link(PathBuf),
 }
 
-/// Why this group might not work here. Switching is done by asking hyprpaper through hyprctl, so
-/// that is the whole dependency -- a machine without it can still be asked what images exist, which
-/// is why `wallpaper.status` answers regardless.
-pub fn available() -> Result<(), String> {
-    if hyprctl_available() {
-        Ok(())
-    } else {
-        Err("hyprctl is not installed".to_string())
+fn hyprpaper_config() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("hypr/hyprpaper.conf"))
+}
+
+/// The image path hyprpaper.conf names, from either dialect: 0.8's `wallpaper { path = ... }`
+/// block, or the older one-line `wallpaper = monitor,path`. The first one wins -- a config with a
+/// wallpaper per monitor cannot be switched as a whole through one link anyway.
+fn configured_path(conf: &str) -> Option<String> {
+    for line in conf.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let path = match key.trim() {
+            "path" => value,
+            "wallpaper" => value.split_once(',').map(|(_, p)| p.trim()).unwrap_or(""),
+            _ => continue,
+        };
+        // Old-style values may carry a fit mode as a prefix: `contain:/path`.
+        let path = path.rsplit_once(':').map(|(_, p)| p).unwrap_or(path);
+        if !path.is_empty() {
+            return Some(shellexpand::tilde(path).into_owned());
+        }
     }
+    None
+}
+
+/// The symlink hyprpaper.conf draws from, if it draws from one. A plain file cannot be used: the
+/// image itself would have to be overwritten, and that is the user's picture, not this daemon's.
+fn config_link() -> Result<PathBuf, String> {
+    let conf = hyprpaper_config().ok_or("no config directory")?;
+    let text = std::fs::read_to_string(&conf)
+        .map_err(|_| format!("hyprpaper's IPC is off outside Hyprland and {} cannot be read", conf.display()))?;
+    let path = configured_path(&text)
+        .ok_or_else(|| format!("{} names no wallpaper path", conf.display()))?;
+    let path = PathBuf::from(path);
+    let is_link = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link {
+        return Err(format!(
+            "hyprpaper's IPC is off outside Hyprland, and the path in hyprpaper.conf ({}) is not a symlink that can be repointed",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+fn backend() -> Result<Backend, String> {
+    if crate::compositor::ipc::hypr_running() {
+        return if which::which("hyprctl").is_ok() {
+            Ok(Backend::Ipc)
+        } else {
+            Err("hyprctl is not installed".to_string())
+        };
+    }
+    if which::which("systemctl").is_err() {
+        return Err("hyprpaper's IPC is off outside Hyprland, and systemctl is not here to restart it".into());
+    }
+    config_link().map(Backend::Link)
+}
+
+/// Why this group might not work here. A machine where it cannot still be asked what images
+/// exist, which is why `wallpaper.status` answers regardless.
+pub fn available() -> Result<(), String> {
+    backend().map(|_| ())
 }
 
 /// Ask hyprpaper to switch.
@@ -185,7 +254,17 @@ pub fn available() -> Result<(), String> {
 /// Worth knowing if this ever looks wrong: the mode is NOT a prefix on the path. `contain:/foo.jpg`
 /// is rejected as a bad path, which is an easy thing to reach for and an easy error to misread.
 fn apply(path: &str) -> Result<()> {
-    let output = Command::new("hyprctl")
+    match backend().map_err(anyhow::Error::msg)? {
+        Backend::Ipc => apply_ipc(path),
+        Backend::Link(link) => {
+            relink(&link, path)?;
+            restart_hyprpaper()
+        }
+    }
+}
+
+fn apply_ipc(path: &str) -> Result<()> {
+    let output = crate::compositor::ipc::hyprctl()
         .args([
             "hyprpaper",
             "wallpaper",
@@ -202,15 +281,52 @@ fn apply(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Point `link` at `target`, atomically: a new link beside it renamed over the old one, so a
+/// hyprpaper starting at the wrong moment never finds the path missing.
+fn relink(link: &Path, target: &str) -> Result<()> {
+    let name = link.file_name().and_then(|n| n.to_str()).unwrap_or("wallpaper");
+    let staging = link.with_file_name(format!(".{name}.epochoxide"));
+    let _ = std::fs::remove_file(&staging);
+    std::os::unix::fs::symlink(target, &staging)?;
+    std::fs::rename(&staging, link)?;
+    Ok(())
+}
+
+fn unit_active() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", HYPRPAPER_UNIT])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Make hyprpaper read its config again. Only the systemd unit is restarted: a hyprpaper started
+/// some other way is not this daemon's to kill, and one it respawned itself would die with the
+/// daemon's cgroup.
+fn restart_hyprpaper() -> Result<()> {
+    if !unit_active() {
+        bail!("{HYPRPAPER_UNIT} is not running; the wallpaper will show when it starts");
+    }
+    let output = Command::new("systemctl")
+        .args(["--user", "restart", HYPRPAPER_UNIT])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "restarting {HYPRPAPER_UNIT} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 pub fn status() -> Wallpaper {
     let wallpapers = scan();
-    let available = hyprctl_available();
+    let backend = backend();
     Wallpaper {
         current: current(),
         directories: directories(),
         fit_mode: fit_mode(),
-        unavailable_reason: (!available).then(|| "hyprctl is not installed".to_string()),
-        available,
+        available: backend.is_ok(),
+        unavailable_reason: backend.err(),
         wallpapers,
     }
 }
@@ -255,7 +371,46 @@ pub fn restore() {
     if !Path::new(&saved).exists() {
         return;
     }
-    if apply(&saved).is_ok() {
+    let restored = match backend() {
+        Ok(Backend::Ipc) => apply_ipc(&saved).is_ok(),
+        // A link already pointing at the choice needs no restart -- hyprpaper drew it at startup.
+        // Otherwise repoint it; restarting is best-effort, since hyprpaper may simply not have
+        // started yet, and then it reads the new link when it does.
+        Ok(Backend::Link(link)) => {
+            if std::fs::read_link(&link).is_ok_and(|t| t == Path::new(&saved)) {
+                true
+            } else {
+                relink(&link, &saved).is_ok() && {
+                    let _ = restart_hyprpaper();
+                    true
+                }
+            }
+        }
+        Err(_) => false,
+    };
+    if restored {
         *CURRENT.lock().unwrap() = Some(saved);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::configured_path;
+
+    #[test]
+    fn reads_block_dialect() {
+        let conf = "wallpaper {\n  monitor=\n  path=/a/current # chosen\n}\nipc=on\n";
+        assert_eq!(configured_path(conf).as_deref(), Some("/a/current"));
+    }
+
+    #[test]
+    fn reads_line_dialect() {
+        let conf = "preload = /x.png\nwallpaper = DP-1, contain:/a/b.png\n";
+        assert_eq!(configured_path(conf).as_deref(), Some("/a/b.png"));
+    }
+
+    #[test]
+    fn none_without_a_path() {
+        assert_eq!(configured_path("ipc=on\nsplash=false\n"), None);
     }
 }
