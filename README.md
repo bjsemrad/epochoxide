@@ -874,6 +874,24 @@ whatever daemon is managing the CPU puts its own decision back within seconds un
 through its own override, so a switch that writes sysfs directly would appear to work and then
 quietly undo itself.
 
+### Wallpaper
+
+```bash
+epochoxide api wallpaper.status
+epochoxide api wallpaper.set --params '{"path": "/home/me/Pictures/Wallpapers/leaves.png"}'
+epochoxide api wallpaper.next --params '{"step": -1}'
+epochoxide api wallpaper.subscribe
+```
+
+The daemon owns the choice -- it is kept in `~/.local/state/epochshell/wallpaper` -- and hands it to
+whichever backend draws, per `wallpaper_backend`: EpochShell itself (`"shell"`), hyprpaper
+(`"hyprpaper"`), or `"auto"`, which is hyprpaper when a hyprpaper process is running and the shell
+otherwise. `wallpaper.status` reports which one is in effect as `backend`.
+
+`wallpaper.subscribe` streams the status: once on connect, again whenever the state file changes,
+and every two minutes regardless. It watches the file rather than its own `set`, so a one-shot
+`epochctl wallpaper set` run with no daemon still reaches a shell that is drawing.
+
 ### LocalSend
 
 ```bash

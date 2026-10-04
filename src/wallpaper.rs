@@ -5,13 +5,22 @@
 //! has to be restored before anything else draws, which only something started at session time can
 //! do.
 //!
-//! Under Hyprland, applied through `hyprctl hyprpaper wallpaper ",<path>"`, which hyprpaper 0.8
-//! switches on with no reload. Anywhere else -- niri -- hyprpaper still draws, but it turns its IPC
-//! off at startup ("not running under hyprland, IPC will be disabled"), so nothing can switch it
-//! live. There the switch goes through hyprpaper's config instead: when that config points at a
-//! symlink, the link is repointed and hyprpaper restarted to read it again. See `Backend`.
+//! Two things can draw it, chosen by `wallpaper_backend`:
 //!
-//! Two things about hyprpaper shape the rest of this file:
+//!   * The shell itself, on a background layer surface. Nothing is applied here at all: a switch is
+//!     remembered and announced over `wallpaper.subscribe`, and the shell draws whatever was
+//!     announced. This works the same under every compositor and switches with no restart.
+//!   * hyprpaper. Under Hyprland, applied through `hyprctl hyprpaper wallpaper ",<path>"`, which
+//!     hyprpaper 0.8 switches on with no reload. Anywhere else -- niri -- hyprpaper still draws, but
+//!     it turns its IPC off at startup ("not running under hyprland, IPC will be disabled"), so
+//!     nothing can switch it live. There the switch goes through hyprpaper's config instead: when
+//!     that config points at a symlink, the link is repointed and hyprpaper restarted to read it
+//!     again.
+//!
+//! "auto", the default, uses hyprpaper when it is running and the shell otherwise -- so moving to
+//! the shell is a matter of no longer starting hyprpaper. See `Backend`.
+//!
+//! Two things about hyprpaper shape the rest of this file, whichever backend is in use:
 //!
 //!   * Its `listactive` reports what was loaded at startup and does not follow a live switch, so it
 //!     cannot answer "what is set now". This module remembers instead.
@@ -29,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -47,6 +57,9 @@ pub struct Wallpaper {
     pub current: String,
     pub directories: Vec<String>,
     pub fit_mode: String,
+    /// What is drawing it: "shell" or "hyprpaper", or empty when neither can be used here. The
+    /// shell draws only when this says "shell", so it never paints over a running hyprpaper.
+    pub backend: String,
     pub available: bool,
     pub unavailable_reason: Option<String>,
 }
@@ -58,6 +71,14 @@ static CURRENT: Mutex<Option<String>> = Mutex::new(None);
 /// read a config out of, so the settings this module needs are put somewhere it can reach.
 static DIRECTORIES: OnceLock<Vec<String>> = OnceLock::new();
 static FIT_MODE: OnceLock<String> = OnceLock::new();
+static BACKEND: OnceLock<String> = OnceLock::new();
+
+/// Values `wallpaper_backend` accepts.
+const BACKENDS: &[&str] = &["auto", "shell", "hyprpaper"];
+
+/// Fit modes the shell draws. Qt has a fill mode for each, stretch included, so none of
+/// hyprpaper's caveats below apply when the shell is drawing.
+const SHELL_FIT_MODES: &[&str] = &["cover", "contain", "tile", "stretch"];
 
 /// Fit modes that reach the screen as themselves. Everything else hyprpaper renders as "cover"
 /// without saying so, which makes a wrong value indistinguishable from the setting having no
@@ -71,8 +92,19 @@ const FIT_MODES_LOST: &[&str] = &["stretch", "fit", "fill"];
 
 pub fn configure(config: &Config) {
     let _ = DIRECTORIES.set(config.wallpaper_dirs.clone());
+
+    let mut backend = config.wallpaper_backend.clone();
+    if !BACKENDS.contains(&backend.as_str()) {
+        eprintln!("wallpaper: backend {backend:?}: not one of {BACKENDS:?}, using \"auto\"");
+        backend = "auto".into();
+    }
+
+    // Warned about once, for the backend that will actually see the value. The shell's list is a
+    // superset of hyprpaper's, so "shell" only complains about a word nothing understands.
     let wanted = config.wallpaper_fit_mode.clone();
-    if !FIT_MODES.contains(&wanted.as_str()) {
+    if !SHELL_FIT_MODES.contains(&wanted.as_str()) {
+        eprintln!("wallpaper: {wanted:?}: not a fit mode, it will render as \"cover\"");
+    } else if backend != "shell" && !FIT_MODES.contains(&wanted.as_str()) {
         let why = if FIT_MODES_LOST.contains(&wanted.as_str()) {
             "hyprpaper 0.8.4 cannot stretch over IPC"
         } else {
@@ -81,6 +113,14 @@ pub fn configure(config: &Config) {
         eprintln!("wallpaper: {wanted:?}: {why}, hyprpaper will render \"cover\"");
     }
     let _ = FIT_MODE.set(wanted);
+    let _ = BACKEND.set(backend);
+}
+
+fn backend_setting() -> String {
+    BACKEND
+        .get()
+        .cloned()
+        .unwrap_or_else(|| Config::default().wallpaper_backend)
 }
 
 fn directories() -> Vec<String> {
@@ -111,22 +151,27 @@ fn remembered() -> Option<String> {
     Some(saved.to_string())
 }
 
-/// What is on screen. Falls back to the state file, which is what makes a one-shot CLI call
-/// correct: `epochctl wallpaper next` run with no daemon has nothing in memory to step from, and
-/// without this it would always step from the first image rather than the current one.
+/// What is on screen. The state file comes first: it is what a one-shot CLI call writes, so a
+/// `epochctl wallpaper set` that ran with no daemon is still the truth once the daemon is back.
+/// Memory only answers when the file cannot be read -- no state directory, say -- so a switch
+/// still holds for the life of the process.
 fn current() -> String {
-    if let Some(held) = CURRENT.lock().unwrap().clone() {
-        return held;
-    }
-    remembered().unwrap_or_default()
+    remembered()
+        .or_else(|| CURRENT.lock().unwrap().clone())
+        .unwrap_or_default()
 }
 
+/// Write the choice down, atomically: `wallpaper.subscribe` watches this file, and a plain write
+/// truncates before it writes, which a watcher would read as the wallpaper being unset.
 fn remember(path: &str) {
     let Some(target) = state_path() else { return };
     if let Some(parent) = target.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(target, format!("{path}\n"));
+    let staging = target.with_file_name(".wallpaper.epochoxide");
+    if std::fs::write(&staging, format!("{path}\n")).is_ok() {
+        let _ = std::fs::rename(&staging, &target);
+    }
 }
 
 /// Walk one directory for images, following symlinks: a home-manager wallpaper directory is
@@ -188,8 +233,11 @@ pub fn defer_restarts() {
 }
 
 /// How a switch reaches the screen. Decided per call rather than once at startup, because the
-/// daemon outlives a logout and the next session may be the other compositor.
+/// daemon outlives a logout and the next session may be the other compositor -- or may not have
+/// started hyprpaper at all.
 enum Backend {
+    /// The shell draws it. Nothing to apply; the switch is announced and the shell follows.
+    Shell,
     /// Hyprland is running, so hyprpaper's IPC is up and a switch is instant.
     Ipc,
     /// hyprpaper's IPC is off, but its config draws from this symlink: repoint it and restart.
@@ -244,6 +292,29 @@ fn config_link() -> Result<PathBuf, String> {
 }
 
 fn backend() -> Result<Backend, String> {
+    match backend_setting().as_str() {
+        "shell" => Ok(Backend::Shell),
+        "hyprpaper" => hyprpaper_backend(),
+        // Whichever is actually here. hyprpaper running means someone wants it drawing, and the
+        // shell painting a second wallpaper under it would only waste memory.
+        _ if hyprpaper_running() => hyprpaper_backend(),
+        _ => Ok(Backend::Shell),
+    }
+}
+
+/// Whether a hyprpaper process exists, however it was started: a Hyprland `exec-once` is as
+/// common as the systemd unit, so asking systemd alone would miss half of them.
+fn hyprpaper_running() -> bool {
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    procs.flatten().any(|entry| {
+        std::fs::read_to_string(entry.path().join("comm"))
+            .is_ok_and(|comm| comm.trim() == "hyprpaper")
+    })
+}
+
+fn hyprpaper_backend() -> Result<Backend, String> {
     if crate::compositor::ipc::hypr_running() {
         return if which::which("hyprctl").is_ok() {
             Ok(Backend::Ipc)
@@ -254,7 +325,10 @@ fn backend() -> Result<Backend, String> {
     if which::which("systemctl").is_err() {
         return Err("hyprpaper's IPC is off outside Hyprland, and systemctl is not here to restart it".into());
     }
-    config_link().map(Backend::Link)
+    // The shell is the easy way out of every refusal below, so say so.
+    config_link()
+        .map(Backend::Link)
+        .map_err(|why| format!("{why} (or set wallpaper_backend = \"shell\" and stop hyprpaper)"))
 }
 
 /// Why this group might not work here. A machine where it cannot still be asked what images
@@ -274,6 +348,7 @@ pub fn available() -> Result<(), String> {
 /// is rejected as a bad path, which is an easy thing to reach for and an easy error to misread.
 fn apply(path: &str) -> Result<()> {
     match backend().map_err(anyhow::Error::msg)? {
+        Backend::Shell => Ok(()),
         Backend::Ipc => apply_ipc(path),
         Backend::Link(link) => {
             relink(&link, path)?;
@@ -370,13 +445,70 @@ fn restart_hyprpaper() -> Result<()> {
 pub fn status() -> Wallpaper {
     let wallpapers = scan();
     let backend = backend();
+    let name = match &backend {
+        Ok(Backend::Shell) => "shell",
+        Ok(_) => "hyprpaper",
+        Err(_) => "",
+    };
     Wallpaper {
         current: current(),
         directories: directories(),
         fit_mode: fit_mode(),
+        backend: name.into(),
         available: backend.is_ok(),
         unavailable_reason: backend.err(),
         wallpapers,
+    }
+}
+
+/// How often `watch` sends the status whether or not anything changed. It is the only way a
+/// stream notices a client that has gone -- a write is what fails -- and it doubles as the rescan
+/// that picks up images dropped into a wallpaper directory.
+const WATCH_HEARTBEAT: Duration = Duration::from_secs(120);
+
+/// Stream the status: once now, again whenever the choice changes, and on the heartbeat.
+///
+/// Changes are noticed by watching the state file rather than by hooking `set`, because the file
+/// is written by more than this process: a one-shot `epochctl wallpaper set` with no daemon
+/// writes it too, and the shell drawing the wallpaper has to follow that just the same.
+pub fn watch(mut emit: impl FnMut(&Wallpaper) -> Result<()>) -> Result<()> {
+    use notify::Watcher;
+
+    let Some(state) = state_path() else {
+        bail!("no state directory to watch");
+    };
+    let Some(dir) = state.parent() else {
+        bail!("no state directory to watch");
+    };
+    std::fs::create_dir_all(dir)?;
+
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(tx)?;
+    // The directory, not the file: `remember` renames a new file over the old one, which a watch
+    // on the file itself would lose track of after the first switch.
+    watcher.watch(dir, notify::RecursiveMode::NonRecursive)?;
+
+    let mut last = status();
+    emit(&last)?;
+    loop {
+        match rx.recv_timeout(WATCH_HEARTBEAT) {
+            Ok(Ok(event)) => {
+                if !event.paths.iter().any(|p| p == &state) {
+                    continue;
+                }
+                let now = status();
+                if now != last {
+                    last = now;
+                    emit(&last)?;
+                }
+            }
+            Ok(Err(err)) => eprintln!("wallpaper: watching {}: {err}", dir.display()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                last = status();
+                emit(&last)?;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => bail!("the state file watcher stopped"),
+        }
     }
 }
 
@@ -421,6 +553,8 @@ pub fn restore() {
         return;
     }
     let restored = match backend() {
+        // The shell asks for the status when it connects, which is all the restoring it needs.
+        Ok(Backend::Shell) => true,
         Ok(Backend::Ipc) => apply_ipc(&saved).is_ok(),
         // A link already pointing at the choice needs no restart -- hyprpaper drew it at startup.
         // Otherwise repoint it; restarting is best-effort, since hyprpaper may simply not have

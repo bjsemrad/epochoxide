@@ -48,10 +48,14 @@ wallpaper_dirs = [
   "~/Wallpapers",
   "~/.local/share/wallpapers",
 ]
-# How hyprpaper fits an image to the output. "cover" crops the overflow, "contain" letterboxes,
-# "tile" repeats. Those three are the ones that work.
+# What draws the wallpaper. "shell" is EpochShell itself, on a background layer surface: instant
+# switches under any compositor, no hyprpaper needed. "hyprpaper" keeps hyprpaper drawing. "auto"
+# uses hyprpaper when a hyprpaper process is running and the shell otherwise.
+wallpaper_backend = "auto"
+# How the image is fitted to the output. "cover" crops the overflow, "contain" letterboxes, "tile"
+# repeats, "stretch" distorts to fill. The shell draws all four.
 #
-# There is no working fourth: hyprpaper 0.8.4 cannot be made to stretch over IPC. hyprctl parses
+# Under hyprpaper only the first three work: hyprpaper 0.8.4 cannot be made to stretch over IPC. hyprctl parses
 # "stretch"/"fit" into its STRETCH enum, hyprpaper turns that enum back into the string "fit", and
 # its own parser only accepts "fill" for stretch -- so the value falls through and renders as
 # "cover". "fill" fares no better: hyprctl does not know that word and defaults it to "cover" too.

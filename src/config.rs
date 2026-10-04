@@ -61,7 +61,11 @@ pub struct Config {
     pub recording_dir: String,
     /// Directories the wallpaper switcher looks in, searched two levels deep for images.
     pub wallpaper_dirs: Vec<String>,
-    /// How hyprpaper fits an image to the output. This is sent over hyprctl, which understands
+    /// What draws the wallpaper: "shell" (EpochShell, on a background layer), "hyprpaper", or
+    /// "auto" -- hyprpaper when it is running, the shell otherwise.
+    pub wallpaper_backend: String,
+    /// How the image is fitted to the output. The shell draws "cover", "contain", "tile" and
+    /// "stretch" as named. Under hyprpaper this is sent over hyprctl, which understands
     /// "contain", "tile", "stretch"/"fit", and quietly treats everything else as "cover" -- so a
     /// mode it does not know is not an error here, it is a wallpaper that ignored the setting.
     ///
@@ -157,6 +161,7 @@ struct PartialConfig {
     recording_dir: Option<String>,
     wallpaper_dirs: Option<Vec<String>>,
     wallpaper_fit_mode: Option<String>,
+    wallpaper_backend: Option<String>,
     recording_filename: Option<String>,
     recording_notify: Option<bool>,
     recording_framerate: Option<u32>,
@@ -236,6 +241,7 @@ impl Default for Config {
             // Worth knowing when testing this by hand: hyprpaper only re-fits when the target
             // changes, so re-sending the same image with a different mode does nothing at all.
             wallpaper_fit_mode: "cover".into(),
+            wallpaper_backend: "auto".into(),
             recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
             recording_notify: true,
             recording_framerate: 30,
@@ -347,6 +353,9 @@ impl Config {
         }
         if let Some(v) = partial.wallpaper_fit_mode {
             cfg.wallpaper_fit_mode = v;
+        }
+        if let Some(v) = partial.wallpaper_backend {
+            cfg.wallpaper_backend = v;
         }
         if let Some(v) = partial.recording_dir {
             cfg.recording_dir = v;

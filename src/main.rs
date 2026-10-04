@@ -130,7 +130,7 @@ fn main() -> Result<()> {
             nix::watch();
             // Put back the wallpaper chosen last session, before anything draws. hyprpaper starts
             // from its own config and knows nothing about the choice, so without this a reboot
-            // silently reverts it. Daemon-only: a one-shot CLI call should not repaint the desktop.
+            // silently reverts it. (When the shell draws, it asks for the choice itself.) Daemon-only: a one-shot CLI call should not repaint the desktop.
             wallpaper::restore();
             wallpaper::defer_restarts();
             if config.localsend_receive {

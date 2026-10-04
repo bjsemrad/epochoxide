@@ -441,6 +441,10 @@ const WALLPAPER: &[Method] = &[
         "Step through the list without naming a path",
         &[("step", "optional signed int, defaulting to 1; -1 goes back")],
     ),
+    streaming(
+        "subscribe",
+        "Stream wallpaper.status whenever the wallpaper changes, and every two minutes regardless",
+    ),
 ];
 
 const GROUPS: &[Group] = &[
@@ -606,6 +610,11 @@ pub fn stream(
         "compositor.subscribe" => {
             let mut emit = emit;
             compositor::watch(|state| emit(serde_json::to_value(state).unwrap_or(Value::Null)))
+                .map_err(backend_error)
+        }
+        "wallpaper.subscribe" => {
+            let mut emit = emit;
+            wallpaper::watch(|state| emit(serde_json::to_value(state).unwrap_or(Value::Null)))
                 .map_err(backend_error)
         }
         _ => Err(ApiError::new(
@@ -879,6 +888,10 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
             Ok(json!({ "started": true, "command": command }))
         }
         ("wallpaper", "status") => value(wallpaper::status()),
+        ("wallpaper", "subscribe") => Err(ApiError::new(
+            ErrorCode::InvalidParams,
+            "wallpaper.subscribe is a streaming method; it cannot be called as a single request",
+        )),
         ("wallpaper", "set") => {
             let path = params
                 .get("path")
