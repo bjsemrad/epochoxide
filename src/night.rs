@@ -5,9 +5,11 @@
 //! That makes turning it off a kill rather than another command, and means nothing can leave a
 //! session tinted after the daemon goes away.
 //!
-//! Which tool is a detail: `hyprsunset` works on niri as well as Hyprland, because niri implements
-//! the same gamma-control protocol, but `gammastep` and `wlsunset` are looked for too so a machine
-//! with either is not left out.
+//! Which tool depends on the compositor. `gammastep` and `wlsunset` speak `wlr-gamma-control`,
+//! which niri, sway and Hyprland all implement. `hyprsunset` does not: from 0.2 on it speaks only
+//! `hyprland-ctm-control`, which is Hyprland's own, so on niri it starts, finds nothing to talk to,
+//! and leaves the screen exactly as it was. It is the first choice under Hyprland -- it is
+//! Hyprland's own tool -- and never chosen anywhere else.
 
 use crate::config::Config;
 use crate::notify;
@@ -68,27 +70,38 @@ fn configured_temperature() -> u32 {
         .unwrap_or(&Config::default().night_light_temperature)
 }
 
-/// The first tool installed, and the arguments it wants.
+/// Whether a tool can warm the screen under this compositor. hyprsunset only under Hyprland: see
+/// the module comment.
+fn usable_here(name: &str, on_hyprland: bool) -> bool {
+    name != "hyprsunset" || on_hyprland
+}
+
+/// The first tool installed that works under the compositor actually running, and the arguments
+/// it wants. Asked of the running compositor rather than the environment, which a daemon started
+/// in one session can carry into the next.
 fn tool() -> Option<(&'static str, &'static [&'static str])> {
+    let on_hyprland = crate::compositor::active().is_some_and(|backend| backend.name() == "hypr");
     TOOLS
         .iter()
+        .filter(|(name, _)| usable_here(name, on_hyprland))
         .find(|(name, _)| which::which(name).is_ok())
         .map(|(name, args)| (*name, *args))
 }
 
 pub fn available() -> Result<(), String> {
     if tool().is_some() {
-        Ok(())
-    } else {
-        Err(format!(
-            "none of {} is installed",
-            TOOLS
-                .iter()
-                .map(|(name, _)| *name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
+        return Ok(());
     }
+    let on_hyprland = crate::compositor::active().is_some_and(|backend| backend.name() == "hypr");
+    Err(format!(
+        "none of {} is installed",
+        TOOLS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| usable_here(name, on_hyprland))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 fn held() -> Result<std::sync::MutexGuard<'static, Option<Held>>> {
@@ -256,4 +269,12 @@ mod tests {
     // Turning it on is not a unit test for the same reason stay-awake's is not: it would tint the
     // screen of whatever machine ran the suite, and a failure would leave it that way. That path is
     // exercised through `epochctl toggle night-light`.
+
+    #[test]
+    fn hyprsunset_is_only_used_under_hyprland() {
+        assert!(usable_here("hyprsunset", true));
+        assert!(!usable_here("hyprsunset", false));
+        assert!(usable_here("gammastep", false));
+        assert!(usable_here("wlsunset", true));
+    }
 }
