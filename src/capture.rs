@@ -79,6 +79,8 @@ pub struct Request {
     pub copy: Option<bool>,
     pub save: Option<bool>,
     pub notify: Option<bool>,
+    /// Open the shot in satty to annotate it, overriding `screenshot_annotate`.
+    pub annotate: Option<bool>,
     /// Where to save, overriding `screenshot_dir`.
     pub directory: Option<PathBuf>,
     /// Tesseract language for `ocr`, overriding `ocr_language`.
@@ -105,6 +107,11 @@ pub struct Shot {
     pub width: u32,
     pub height: u32,
     pub bytes: u64,
+    /// The shot went to the annotation editor rather than straight to the clipboard or a file:
+    /// copying and saving are the editor's to do now, when the user is done. Defaulted so an
+    /// older daemon's answer still reads.
+    #[serde(default)]
+    pub annotating: bool,
 }
 
 impl Shot {
@@ -122,6 +129,7 @@ impl Shot {
             width: 0,
             height: 0,
             bytes: 0,
+            annotating: false,
         }
     }
 }
@@ -209,6 +217,9 @@ pub struct Status {
     pub ocr_language: String,
     /// False when wf-recorder is not installed, which is what `capture.record` needs.
     pub record: bool,
+    /// Whether shots can be annotated: satty is installed.
+    #[serde(default)]
+    pub annotate: bool,
     pub recording_directory: String,
     pub compositor: Option<String>,
 }
@@ -218,6 +229,7 @@ const SLURP: &str = "slurp";
 const WL_COPY: &str = "wl-copy";
 const TESSERACT: &str = "tesseract";
 const WF_RECORDER: &str = "wf-recorder";
+const SATTY: &str = "satty";
 
 /// How many copy-only screenshots to keep in the scratch directory.
 ///
@@ -233,6 +245,7 @@ struct Settings {
     copy: bool,
     save: bool,
     notify: bool,
+    annotate: bool,
     ocr_language: String,
     recording_directory: PathBuf,
     recording_filename: String,
@@ -249,6 +262,7 @@ impl Default for Settings {
             copy: config.screenshot_copy,
             save: config.screenshot_save,
             notify: config.screenshot_notify,
+            annotate: config.screenshot_annotate,
             ocr_language: config.ocr_language,
             recording_directory: PathBuf::from(crate::config::expand(&config.recording_dir)),
             recording_filename: config.recording_filename,
@@ -267,6 +281,7 @@ pub fn configure(config: &Config) {
         copy: config.screenshot_copy,
         save: config.screenshot_save,
         notify: config.screenshot_notify,
+        annotate: config.screenshot_annotate,
         ocr_language: config.ocr_language.clone(),
         recording_directory: PathBuf::from(crate::config::expand(&config.recording_dir)),
         recording_filename: config.recording_filename.clone(),
@@ -307,11 +322,13 @@ pub fn status() -> Status {
             tool("notify-send", "capture notifications", false),
             tool(TESSERACT, "reading text out of a capture", false),
             tool(WF_RECORDER, "screen recording", false),
+            tool(SATTY, "annotating screenshots", false),
         ],
         window_capture: regions.is_some(),
         ocr: which(TESSERACT).is_some(),
         ocr_language: settings.ocr_language,
         record: which(WF_RECORDER).is_some(),
+        annotate: which(SATTY).is_some(),
         recording_directory: settings.recording_directory.display().to_string(),
         compositor: compositor::active().map(|backend| backend.name().to_string()),
     }
@@ -431,6 +448,11 @@ pub fn screenshot(request: &Request) -> Result<Shot> {
     let copy = request.copy.unwrap_or(settings.copy);
     let save = request.save.unwrap_or(settings.save);
     let notify = request.notify.unwrap_or(settings.notify);
+    let annotate = request.annotate.unwrap_or(settings.annotate);
+
+    if annotate {
+        return annotate_shot(request, copy, save);
+    }
 
     let Some(frame) = capture(request, save)? else {
         return Ok(Shot::cancelled(request.mode));
@@ -460,8 +482,102 @@ pub fn screenshot(request: &Request) -> Result<Shot> {
         width: frame.width,
         height: frame.height,
         bytes: frame.bytes,
+        annotating: false,
     };
     Ok(shot)
+}
+
+/// Capture, then hand the shot to satty instead of copying or saving it: what to keep is decided
+/// after the drawing is done, in the editor.
+///
+/// The frame goes to the scratch directory, never straight to the screenshots folder -- an
+/// unannotated original saved beside the annotated one would be a second file nobody asked for.
+/// Satty is told where the finished shot belongs: the screenshots folder when saving is on (and no
+/// output file at all when it is off, so nothing can land on disk), and the clipboard by way of
+/// `wl-copy`. Enter does what the switches say; Ctrl+C and Ctrl+S are there too, and satty closes
+/// itself once one has been done.
+///
+/// Started and left: the user may take a minute over it, and this call answers the moment the
+/// editor is open. A thread waits on it so it is reaped when it closes.
+fn annotate_shot(request: &Request, copy: bool, save: bool) -> Result<Shot> {
+    let settings = settings();
+    require(SATTY)?;
+
+    let Some(frame) = capture(request, false)? else {
+        return Ok(Shot::cancelled(request.mode));
+    };
+
+    let output = if save {
+        let directory = request
+            .directory
+            .clone()
+            .unwrap_or_else(|| settings.directory.clone());
+        std::fs::create_dir_all(&directory)
+            .with_context(|| format!("creating {}", directory.display()))?;
+        Some(unique(&directory, &filename(&settings.filename, "png")))
+    } else {
+        None
+    };
+    let can_copy = copy && which(WL_COPY).is_some();
+
+    let mut child = Command::new(SATTY)
+        .args(satty_args(&frame.path, output.as_deref(), can_copy))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("running {SATTY}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    Ok(Shot {
+        cancelled: false,
+        mode: request.mode.as_str().to_string(),
+        path: Some(frame.path.display().to_string()),
+        saved: false,
+        copied: false,
+        notified: false,
+        geometry: frame.geometry,
+        output: frame.output,
+        window: frame.window,
+        width: frame.width,
+        height: frame.height,
+        bytes: frame.bytes,
+        annotating: true,
+    })
+}
+
+/// How satty is started on a shot. Enter does what the panel's switches asked for -- copy, save,
+/// or both -- and satty exits after it, as it does after Ctrl+C or Ctrl+S.
+fn satty_args(input: &Path, output: Option<&Path>, copy: bool) -> Vec<String> {
+    let mut args = vec![
+        "--filename".to_string(),
+        input.display().to_string(),
+        "--early-exit".to_string(),
+        "--initial-tool".to_string(),
+        "arrow".to_string(),
+    ];
+    if let Some(output) = output {
+        args.push("--output-filename".to_string());
+        args.push(output.display().to_string());
+    }
+    if copy {
+        args.push("--copy-command".to_string());
+        args.push(WL_COPY.to_string());
+    }
+    let mut on_enter = Vec::new();
+    if copy {
+        on_enter.push("save-to-clipboard");
+    }
+    if output.is_some() {
+        on_enter.push("save-to-file");
+    }
+    if !on_enter.is_empty() {
+        args.push("--actions-on-enter".to_string());
+        args.push(on_enter.join(","));
+    }
+    args
 }
 
 /// Capture a region and read the text out of it.
@@ -1482,5 +1598,24 @@ mod tests {
         assert_eq!(image_format(Path::new("a.png")), Some("png"));
         assert_eq!(image_format(Path::new("a.JPEG")), Some("jpeg"));
         assert_eq!(image_format(Path::new("a.txt")), None);
+    }
+
+    #[test]
+    fn satty_is_told_where_the_shot_goes() {
+        let args = satty_args(Path::new("/tmp/in.png"), Some(Path::new("/s/out.png")), true);
+        let joined = args.join(" ");
+        assert!(joined.contains("--filename /tmp/in.png"));
+        assert!(joined.contains("--output-filename /s/out.png"));
+        assert!(joined.contains("--copy-command wl-copy"));
+        assert!(joined.contains("--actions-on-enter save-to-clipboard,save-to-file"));
+        assert!(joined.contains("--early-exit"));
+    }
+
+    #[test]
+    fn satty_saves_nothing_when_saving_is_off() {
+        let args = satty_args(Path::new("/tmp/in.png"), None, true);
+        assert!(!args.iter().any(|arg| arg == "--output-filename"));
+        assert!(args.join(" ").contains("--actions-on-enter save-to-clipboard"));
+        assert!(!args.join(" ").contains("save-to-file"));
     }
 }

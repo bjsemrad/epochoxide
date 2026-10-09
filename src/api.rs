@@ -231,6 +231,10 @@ const CAPTURE: &[Method] = &[
                 "optional string; where to save this shot, defaulting to screenshot_dir",
             ),
             ("notify", "optional bool, defaulting to screenshot_notify"),
+            (
+                "annotate",
+                "optional bool, defaulting to screenshot_annotate; open the shot in satty, which then copies and saves it",
+            ),
         ],
     ),
     method(
@@ -759,6 +763,7 @@ fn capture_request(params: &Value) -> Result<capture::Request, ApiError> {
         copy: param_bool(params, "copy"),
         save: param_bool(params, "save"),
         notify: param_bool(params, "notify"),
+        annotate: param_bool(params, "annotate"),
         directory: optional_path(params, "directory"),
         language: text("language"),
     })

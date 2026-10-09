@@ -54,6 +54,9 @@ pub struct Config {
     pub screenshot_save: bool,
     /// Announce each screenshot to the session's notification server, which is the shell.
     pub screenshot_notify: bool,
+    /// Open each screenshot in satty to annotate before it is copied or saved, rather than copying
+    /// or saving it straight away.
+    pub screenshot_annotate: bool,
     /// Tesseract language `capture.ocr` reads with. Several can be joined with `+`, e.g.
     /// `eng+deu`, as long as the data files for them are installed.
     pub ocr_language: String,
@@ -157,6 +160,7 @@ struct PartialConfig {
     screenshot_copy: Option<bool>,
     screenshot_save: Option<bool>,
     screenshot_notify: Option<bool>,
+    screenshot_annotate: Option<bool>,
     ocr_language: Option<String>,
     recording_dir: Option<String>,
     wallpaper_dirs: Option<Vec<String>>,
@@ -213,6 +217,7 @@ impl Default for Config {
             screenshot_copy: true,
             screenshot_save: true,
             screenshot_notify: true,
+            screenshot_annotate: false,
             ocr_language: "eng".into(),
             recording_dir: home.join("Videos/Recordings").display().to_string(),
             // ~/.config/hypr first, because that is where a hyprpaper setup actually keeps them --
@@ -344,6 +349,9 @@ impl Config {
         }
         if let Some(v) = partial.screenshot_notify {
             cfg.screenshot_notify = v;
+        }
+        if let Some(v) = partial.screenshot_annotate {
+            cfg.screenshot_annotate = v;
         }
         if let Some(v) = partial.ocr_language {
             cfg.ocr_language = v;
