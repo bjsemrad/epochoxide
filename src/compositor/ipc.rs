@@ -145,18 +145,18 @@ fn lua_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Hyprland's event socket. Every line is `EVENT>>payload`.
+/// Hyprland's event socket. Every line is `EVENT>>payload`, handed on as it is.
 ///
-/// The payloads are never parsed: they say *that* something changed, which is all a re-read
-/// needs, and parsing them here would put Hyprland's event vocabulary back into the data path.
-pub fn hypr_watch(on_event: &mut dyn FnMut() -> anyhow::Result<()>) -> Result<()> {
+/// Mostly the line only says *that* something changed, which is all a re-read needs. The backend
+/// reads the few events that carry state no query reports (see `hyprland::note_event`).
+pub fn hypr_watch(on_event: &mut dyn FnMut(&str) -> anyhow::Result<()>) -> Result<()> {
     let socket = hypr_event_socket_path()
         .ok_or_else(|| anyhow::anyhow!("hyprland event socket not found"))?;
     let stream = UnixStream::connect(socket).context("connecting to the hyprland event socket")?;
     for line in BufReader::new(stream).lines() {
         // A read error means Hyprland went away; ending the watch lets the caller reconnect.
-        let Ok(_line) = line else { break };
-        on_event()?;
+        let Ok(line) = line else { break };
+        on_event(&line)?;
     }
     Ok(())
 }

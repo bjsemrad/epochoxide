@@ -6,6 +6,16 @@ use super::ipc::{
 use super::{Compositor, Monitor, Window, WindowRegion, Workspace};
 use anyhow::Result;
 use serde_json::Value;
+use std::collections::HashSet;
+use std::sync::Mutex;
+
+/// Windows that have asked for attention and not yet had it, by address without its `0x`.
+///
+/// Hyprland reports urgency only as it happens, on the event socket (`urgent>>ADDRESS`); no query
+/// answers "which windows are urgent", so the backend keeps the answer itself. A window leaves the
+/// set when it is focused or closed, or once its workspace has been on screen -- seen, which is
+/// how niri clears it too.
+static URGENT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 pub struct Hyprland;
 
@@ -58,6 +68,7 @@ impl Compositor for Hyprland {
                 )
             })
             .unwrap_or_default();
+        let urgent = urgent_workspaces(&active);
         Some(
             workspaces
                 .as_array()?
@@ -69,8 +80,7 @@ impl Compositor for Hyprland {
                         name: string(workspace, "name").unwrap_or_default(),
                         monitor: string(workspace, "monitor").unwrap_or_default(),
                         active: active.contains(&id),
-                        // Hyprland does not report per-workspace urgency in this payload.
-                        urgent: false,
+                        urgent: urgent.contains(&id),
                         windows: workspace
                             .get("windows")
                             .and_then(Value::as_u64)
@@ -141,8 +151,91 @@ impl Compositor for Hyprland {
     }
 
     fn watch(&self, on_event: &mut dyn FnMut() -> Result<()>) -> Result<()> {
-        hypr_watch(on_event)
+        hypr_watch(&mut |line| {
+            note_event(line);
+            on_event()
+        })
     }
+}
+
+/// Keep track of urgency from one event-socket line. Anything else is ignored here.
+fn note_event(line: &str) {
+    let Some((event, payload)) = line.split_once(">>") else {
+        return;
+    };
+    let Ok(mut urgent) = URGENT.lock() else {
+        return;
+    };
+    apply_event(urgent.get_or_insert_with(HashSet::new), event, payload);
+}
+
+fn apply_event(urgent: &mut HashSet<String>, event: &str, payload: &str) {
+    match event {
+        "urgent" => {
+            urgent.insert(bare_address(payload));
+        }
+        // Focused: the attention has been given. `activewindowv2` carries the address alone.
+        "activewindowv2" | "closewindow" => {
+            urgent.remove(&bare_address(payload));
+        }
+        _ => {}
+    }
+}
+
+/// The workspaces holding a window that wants attention, other than those on screen -- whose
+/// windows count as seen, and are let go.
+fn urgent_workspaces(active: &[i64]) -> HashSet<i64> {
+    let Ok(mut guard) = URGENT.lock() else {
+        return HashSet::new();
+    };
+    let Some(urgent) = guard.as_mut().filter(|set| !set.is_empty()) else {
+        return HashSet::new();
+    };
+    let Some(clients) = json("j/clients", &["clients", "-j"]) else {
+        return HashSet::new();
+    };
+    let placed: Vec<(String, i64)> = clients
+        .as_array()
+        .map(|clients| {
+            clients
+                .iter()
+                .map(|client| {
+                    let address = bare_address(&string(client, "address").unwrap_or_default());
+                    let workspace = client
+                        .get("workspace")
+                        .and_then(|ws| ws.get("id"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    (address, workspace)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    settle_urgency(urgent, &placed, active)
+}
+
+/// Given where each window is and which workspaces are on screen: drop the windows that have been
+/// seen or no longer exist, and name the workspaces the rest are on.
+fn settle_urgency(
+    urgent: &mut HashSet<String>,
+    placed: &[(String, i64)],
+    active: &[i64],
+) -> HashSet<i64> {
+    urgent.retain(|address| {
+        placed
+            .iter()
+            .any(|(other, workspace)| other == address && !active.contains(workspace))
+    });
+    placed
+        .iter()
+        .filter(|(address, _)| urgent.contains(address))
+        .map(|(_, workspace)| *workspace)
+        .collect()
+}
+
+/// A window address as the event socket gives it: `clients` says `0x55d4...`, events `55d4...`.
+fn bare_address(address: &str) -> String {
+    address.trim().trim_start_matches("0x").to_string()
 }
 
 /// Prefer the IPC socket, fall back to the CLI.
@@ -329,6 +422,35 @@ mod tests {
             { "activeWorkspace": { "id": 7 }, "specialWorkspace": { "id": -98 } },
         ]);
         assert_eq!(visible_workspaces(&monitors), vec![4, 7, -98]);
+    }
+
+    #[test]
+    fn urgency_is_set_by_an_urgent_event_and_cleared_by_focus_or_closing() {
+        let mut urgent = HashSet::new();
+        apply_event(&mut urgent, "urgent", "55d4a0");
+        apply_event(&mut urgent, "urgent", "0x77aa10");
+        assert!(urgent.contains("55d4a0") && urgent.contains("77aa10"));
+        apply_event(&mut urgent, "activewindowv2", "55d4a0");
+        apply_event(&mut urgent, "closewindow", "77aa10");
+        apply_event(&mut urgent, "workspace", "3");
+        assert!(urgent.is_empty());
+    }
+
+    #[test]
+    fn a_workspace_is_urgent_until_it_has_been_on_screen() {
+        let mut urgent: HashSet<String> = ["55d4a0".to_string()].into();
+        let placed = vec![("55d4a0".to_string(), 3), ("77aa10".to_string(), 1)];
+        assert_eq!(settle_urgency(&mut urgent, &placed, &[1]), [3].into());
+        // Shown: seen, and let go -- leaving it again does not bring the red back.
+        assert!(settle_urgency(&mut urgent, &placed, &[3]).is_empty());
+        assert!(settle_urgency(&mut urgent, &placed, &[1]).is_empty());
+    }
+
+    #[test]
+    fn an_urgent_window_that_has_gone_is_forgotten() {
+        let mut urgent: HashSet<String> = ["deadbeef".to_string()].into();
+        assert!(settle_urgency(&mut urgent, &[], &[1]).is_empty());
+        assert!(urgent.is_empty());
     }
 
     #[test]
