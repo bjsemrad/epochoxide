@@ -276,8 +276,12 @@ fn configured_path(conf: &str) -> Option<String> {
 /// image itself would have to be overwritten, and that is the user's picture, not this daemon's.
 fn config_link() -> Result<PathBuf, String> {
     let conf = hyprpaper_config().ok_or("no config directory")?;
-    let text = std::fs::read_to_string(&conf)
-        .map_err(|_| format!("hyprpaper's IPC is off outside Hyprland and {} cannot be read", conf.display()))?;
+    let text = std::fs::read_to_string(&conf).map_err(|_| {
+        format!(
+            "hyprpaper's IPC is off outside Hyprland and {} cannot be read",
+            conf.display()
+        )
+    })?;
     let path = configured_path(&text)
         .ok_or_else(|| format!("{} names no wallpaper path", conf.display()))?;
     let path = PathBuf::from(path);
@@ -323,7 +327,10 @@ fn hyprpaper_backend() -> Result<Backend, String> {
         };
     }
     if which::which("systemctl").is_err() {
-        return Err("hyprpaper's IPC is off outside Hyprland, and systemctl is not here to restart it".into());
+        return Err(
+            "hyprpaper's IPC is off outside Hyprland, and systemctl is not here to restart it"
+                .into(),
+        );
     }
     // The shell is the easy way out of every refusal below, so say so.
     config_link()
@@ -359,11 +366,7 @@ fn apply(path: &str) -> Result<()> {
 
 fn apply_ipc(path: &str) -> Result<()> {
     let output = crate::compositor::ipc::hyprctl()
-        .args([
-            "hyprpaper",
-            "wallpaper",
-            &format!(",{path},{}", fit_mode()),
-        ])
+        .args(["hyprpaper", "wallpaper", &format!(",{path},{}", fit_mode())])
         .output()?;
 
     // hyprctl exits 0 and says nothing on success; anything on stdout is the failure.
@@ -378,7 +381,10 @@ fn apply_ipc(path: &str) -> Result<()> {
 /// Point `link` at `target`, atomically: a new link beside it renamed over the old one, so a
 /// hyprpaper starting at the wrong moment never finds the path missing.
 fn relink(link: &Path, target: &str) -> Result<()> {
-    let name = link.file_name().and_then(|n| n.to_str()).unwrap_or("wallpaper");
+    let name = link
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("wallpaper");
     let staging = link.with_file_name(format!(".{name}.epochoxide"));
     let _ = std::fs::remove_file(&staging);
     std::os::unix::fs::symlink(target, &staging)?;
@@ -391,11 +397,21 @@ fn relink(link: &Path, target: &str) -> Result<()> {
 /// started it this session -- is left alone.
 fn unit_running() -> bool {
     let state = Command::new("systemctl")
-        .args(["--user", "show", "-p", "ActiveState", "--value", HYPRPAPER_UNIT])
+        .args([
+            "--user",
+            "show",
+            "-p",
+            "ActiveState",
+            "--value",
+            HYPRPAPER_UNIT,
+        ])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    matches!(state.as_str(), "active" | "activating" | "reloading" | "failed")
+    matches!(
+        state.as_str(),
+        "active" | "activating" | "reloading" | "failed"
+    )
 }
 
 /// Restart hyprpaper once switching settles, or straight away when nothing will be around later.

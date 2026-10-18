@@ -9,6 +9,7 @@
 
 mod hyprland;
 pub mod ipc;
+mod mango;
 mod niri;
 mod sway;
 mod wmctrl;
@@ -200,13 +201,15 @@ pub fn watch(mut emit: impl FnMut(&State) -> Result<()>) -> Result<()> {
 fn backends() -> Vec<Box<dyn Compositor>> {
     let hypr = || Box::new(hyprland::Hyprland) as Box<dyn Compositor>;
     let niri = || Box::new(niri::Niri) as Box<dyn Compositor>;
+    let mango = || Box::new(mango::Mango) as Box<dyn Compositor>;
     let sway = || Box::new(sway::Sway) as Box<dyn Compositor>;
     let wmctrl = || Box::new(wmctrl::Wmctrl) as Box<dyn Compositor>;
     match preferred_from_env() {
-        Some("hypr") => vec![hypr(), niri(), sway(), wmctrl()],
-        Some("sway") => vec![sway(), hypr(), niri(), wmctrl()],
-        Some("niri") => vec![niri(), hypr(), sway(), wmctrl()],
-        _ => vec![hypr(), niri(), sway(), wmctrl()],
+        Some("hypr") => vec![hypr(), niri(), mango(), sway(), wmctrl()],
+        Some("sway") => vec![sway(), hypr(), niri(), mango(), wmctrl()],
+        Some("niri") => vec![niri(), hypr(), mango(), sway(), wmctrl()],
+        Some("mango") => vec![mango(), hypr(), niri(), sway(), wmctrl()],
+        _ => vec![hypr(), niri(), mango(), sway(), wmctrl()],
     }
 }
 
@@ -221,8 +224,16 @@ pub fn preferred_from_env() -> Option<&'static str> {
     if std::env::var_os("NIRI_SOCKET").is_some() {
         return Some("niri");
     }
+    if std::env::var_os("MANGO_INSTANCE_SIGNATURE").is_some() {
+        return Some("mango");
+    }
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok()?.to_lowercase();
-    for (needle, name) in [("hypr", "hypr"), ("sway", "sway"), ("niri", "niri")] {
+    for (needle, name) in [
+        ("hypr", "hypr"),
+        ("sway", "sway"),
+        ("niri", "niri"),
+        ("mango", "mango"),
+    ] {
         if desktop.contains(needle) {
             return Some(name);
         }
@@ -263,7 +274,7 @@ pub fn sort_windows(windows: &mut [Window]) {
 }
 
 /// Order a workspace by its displayed name: numerically when it is a number, which is the usual
-/// case on both Hyprland and niri, and alphabetically after those when it is not.
+/// case on Hyprland, niri and mango, and alphabetically after those when it is not.
 fn workspace_order(name: &str) -> (u8, i64, String) {
     match name.parse::<i64>() {
         Ok(number) => (0, number, String::new()),
@@ -355,6 +366,7 @@ mod tests {
             "SWAYSOCK",
             "NIRI_SOCKET",
             "HYPRLAND_INSTANCE_SIGNATURE",
+            "MANGO_INSTANCE_SIGNATURE",
             "XDG_CURRENT_DESKTOP",
         ] {
             if !vars.iter().any(|(name, _)| *name == key) {
@@ -378,6 +390,13 @@ mod tests {
     }
 
     #[test]
+    fn detects_mango_from_instance_signature() {
+        let _guard = lock_env();
+        set(&[("MANGO_INSTANCE_SIGNATURE", "/run/user/1000/mango-1.sock")]);
+        assert_eq!(preferred_from_env(), Some("mango"));
+    }
+
+    #[test]
     fn without_any_signal_no_backend_is_preferred() {
         let _guard = lock_env();
         set(&[]);
@@ -397,13 +416,13 @@ mod tests {
     #[test]
     fn every_backend_is_tried_whatever_the_environment_says() {
         let names: Vec<&str> = backends().iter().map(|backend| backend.name()).collect();
-        for expected in ["hypr", "niri", "sway", "wmctrl"] {
+        for expected in ["hypr", "niri", "mango", "sway", "wmctrl"] {
             assert!(
                 names.contains(&expected),
                 "{expected} missing from {names:?}"
             );
         }
-        assert_eq!(names.len(), 4, "a backend is listed twice: {names:?}");
+        assert_eq!(names.len(), 5, "a backend is listed twice: {names:?}");
     }
 
     fn window(workspace: &str, x: i64, y: i64, id: &str) -> Window {

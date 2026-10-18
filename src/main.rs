@@ -18,8 +18,8 @@ mod server;
 mod service;
 mod tailscale;
 mod terminal;
-mod wallpaper;
 mod types;
+mod wallpaper;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

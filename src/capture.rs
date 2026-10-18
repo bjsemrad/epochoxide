@@ -1602,7 +1602,11 @@ mod tests {
 
     #[test]
     fn satty_is_told_where_the_shot_goes() {
-        let args = satty_args(Path::new("/tmp/in.png"), Some(Path::new("/s/out.png")), true);
+        let args = satty_args(
+            Path::new("/tmp/in.png"),
+            Some(Path::new("/s/out.png")),
+            true,
+        );
         let joined = args.join(" ");
         assert!(joined.contains("--filename /tmp/in.png"));
         assert!(joined.contains("--output-filename /s/out.png"));
@@ -1615,7 +1619,9 @@ mod tests {
     fn satty_saves_nothing_when_saving_is_off() {
         let args = satty_args(Path::new("/tmp/in.png"), None, true);
         assert!(!args.iter().any(|arg| arg == "--output-filename"));
-        assert!(args.join(" ").contains("--actions-on-enter save-to-clipboard"));
+        assert!(args
+            .join(" ")
+            .contains("--actions-on-enter save-to-clipboard"));
         assert!(!args.join(" ").contains("save-to-file"));
     }
 }

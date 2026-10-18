@@ -18,7 +18,9 @@
 //! Compatibility: the major version changes when an existing method's shape changes
 //! incompatibly. Adding a group, a method, or a field is a minor bump.
 
-use crate::{awake, capture, compositor, hardware, localsend, night, nix, power, tailscale, wallpaper};
+use crate::{
+    awake, capture, compositor, hardware, localsend, night, nix, power, tailscale, wallpaper,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 

@@ -265,6 +265,62 @@ pub fn niri_watch(on_event: &mut dyn FnMut() -> anyhow::Result<()>) -> Result<()
     Ok(())
 }
 
+// --- mango ------------------------------------------------------------------
+
+/// One request on mango's IPC socket: a newline-terminated `mmsg`-style command (`get all-clients`,
+/// `dispatch view,3,0`), answered with a single JSON line before mango closes the connection.
+pub fn mango_request(command: &str) -> Option<String> {
+    let mut stream = UnixStream::connect(mango_socket()?).ok()?;
+    let timeout = Some(Duration::from_millis(300));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    writeln!(stream, "{command}").ok()?;
+    let mut out = String::new();
+    stream.read_to_string(&mut out).ok()?;
+    let out = out.trim();
+    (!out.is_empty()).then(|| out.to_string())
+}
+
+/// mango's client stream. `watch all-clients` is pushed on every arrange, which covers windows
+/// opening, closing, moving, refocusing and every tag switch -- so it alone is enough to know a
+/// re-read is due. As elsewhere, the payload is ignored.
+pub fn mango_watch(on_event: &mut dyn FnMut() -> anyhow::Result<()>) -> Result<()> {
+    let socket = mango_socket().ok_or_else(|| anyhow::anyhow!("mango socket not found"))?;
+    let mut stream = UnixStream::connect(socket).context("connecting to the mango socket")?;
+    writeln!(stream, "watch all-clients")?;
+    stream.flush()?;
+    for line in BufReader::new(stream).lines() {
+        let Ok(_line) = line else { break };
+        on_event()?;
+    }
+    Ok(())
+}
+
+/// `MANGO_INSTANCE_SIGNATURE` is the socket path itself. A daemon started without it looks for
+/// the newest `mango-<pid>.sock` in the runtime directory instead.
+fn mango_socket() -> Option<PathBuf> {
+    if let Ok(socket) = std::env::var("MANGO_INSTANCE_SIGNATURE") {
+        if !socket.is_empty() {
+            return Some(PathBuf::from(socket));
+        }
+    }
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(runtime_dir()).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !(name.starts_with("mango-") && name.ends_with(".sock")) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if latest.as_ref().is_none_or(|(time, _)| modified > *time) {
+            latest = Some((modified, entry.path()));
+        }
+    }
+    latest.map(|(_, path)| path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::lua_string;
