@@ -69,7 +69,7 @@ keywords = ["suspend", "sleep", "ram"]
 [[entries]]
 text = "Log out"
 subtext = "Quit the compositor and return to the login screen"
-value = "([ -n \"$HYPRLAND_INSTANCE_SIGNATURE\" ] && hyprctl dispatch exit) || niri msg action quit || loginctl terminate-session \"$XDG_SESSION_ID\""
+value = "([ -n \"$HYPRLAND_INSTANCE_SIGNATURE\" ] && hyprctl dispatch exit) || ([ -n \"$MANGO_INSTANCE_SIGNATURE\" ] && mmsg dispatch quit) || niri msg action quit || loginctl terminate-session \"$XDG_SESSION_ID\""
 keywords = ["logout", "exit", "session", "quit"]
 
 [[entries]]
