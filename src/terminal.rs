@@ -11,6 +11,10 @@
 //!    which live in an rc file that `sh -c` never reads.
 //! 2. **The terminal stays open.** A window that closes on the last line takes the output with it,
 //!    which is the one thing the user opened a terminal for.
+//! 3. **The terminal is not ours.** Spawned as a plain child it lands in this service's cgroup, and
+//!    a rebuild -- the very thing these terminals run -- restarts the service when it changes, and
+//!    systemd stops everything in the cgroup with it: the terminal was killed mid-rebuild. So it
+//!    goes in a scope of its own (`systemd-run --user --scope`), as the compositor's launches do.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
@@ -46,19 +50,45 @@ pub fn run(command: &str, directory: Option<&Path>, terminal: &str) -> Result<St
         .push_str("\nstatus=$?\nprintf '\\n[exited %s] press enter to close ' \"$status\"\nread _");
 
     let shell = user_shell();
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(format!("{terminal} {shell} -i -c {}", quote(&script)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("running {terminal}"))?;
+    let line = format!("{terminal} {shell} -i -c {}", quote(&script));
+    let mut child = match scoped(&line).spawn() {
+        Ok(child) => child,
+        // No systemd-run (no systemd user session): a plain child, which works until the service
+        // restarts.
+        Err(_) => detached(Command::new("sh").arg("-c").arg(&line))
+            .spawn()
+            .with_context(|| format!("running {terminal}"))?,
+    };
     // Nothing waits on the terminal, but something has to reap it.
     std::thread::spawn(move || {
         let _ = child.wait();
     });
     Ok(command.to_string())
+}
+
+/// `line` in a transient scope of its own, outside this service's cgroup.
+fn scoped(line: &str) -> Command {
+    let mut command = Command::new("systemd-run");
+    command.args([
+        "--user",
+        "--scope",
+        "--collect",
+        "--quiet",
+        "--slice=app.slice",
+        "--",
+        "sh",
+        "-c",
+        line,
+    ]);
+    detached(&mut command);
+    command
+}
+
+fn detached(command: &mut Command) -> &mut Command {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
 }
 
 fn default_terminal() -> Option<String> {
