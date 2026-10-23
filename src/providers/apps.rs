@@ -182,8 +182,13 @@ impl Provider for AppsProvider {
         let exec = desktop_action
             .and_then(|a| app.actions.get(a))
             .unwrap_or(&app.exec);
-        let command = if self.config.launch_prefix.is_empty() {
+        let exec = if app.terminal {
+            super::runner::terminal_command(&self.config, exec)?
+        } else {
             exec.clone()
+        };
+        let command = if self.config.launch_prefix.is_empty() {
+            exec
         } else {
             format!("{} {}", self.config.launch_prefix, exec)
         };

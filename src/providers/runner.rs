@@ -215,7 +215,7 @@ fn looks_like_shell_command(command: &str) -> bool {
     })
 }
 
-fn terminal_command(config: &Config, command: &str) -> Result<String> {
+pub(crate) fn terminal_command(config: &Config, command: &str) -> Result<String> {
     let template = if config.terminal_cmd.is_empty() {
         default_terminal_cmd().ok_or_else(|| anyhow!("no terminal found; set terminal_cmd"))?
     } else {
