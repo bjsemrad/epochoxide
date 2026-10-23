@@ -1,15 +1,3 @@
-//! LocalSend discovery and sending.
-//!
-//! Structured like the Tailscale module: normalized types, no raw protocol detail leaving here.
-//!
-//! LocalSend has no CLI to shell out to, so this speaks the v2 protocol directly. Discovery is a
-//! multicast announcement other devices answer; sending is a two-step HTTP exchange -- register the
-//! transfer, then upload each file with the token that came back.
-//!
-//! Receiving is deliberately not implemented: it means running a server, holding a certificate,
-//! and prompting the user to accept a transfer, which is the shell's job rather than a data
-//! provider's.
-
 mod cert;
 mod http;
 pub mod server;
@@ -23,29 +11,21 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// The multicast group and port every LocalSend device listens on.
 const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
 const PORT: u16 = 53317;
 const PROTOCOL_VERSION: &str = "2.0";
 
-/// How long discovery listens for answers. Devices reply almost immediately; this only bounds how
-/// long a caller waits for the stragglers.
 const DISCOVERY_WINDOW: Duration = Duration::from_millis(1200);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Device {
-    /// The name the device shows to people, e.g. "Brian's Phone".
     pub alias: String,
-    /// Stable per-device id. For HTTPS devices this is the SHA-256 of its certificate, which is
-    /// what makes pinned TLS possible.
     pub fingerprint: String,
     pub device_model: String,
     pub device_type: String,
     pub ip: String,
     pub port: u16,
-    /// "http" or "https".
     pub protocol: String,
-    /// Whether the device also offers files for download.
     pub download: bool,
 }
 
@@ -66,11 +46,6 @@ pub struct Sent {
     pub files: Vec<String>,
 }
 
-/// This machine, as announced to other devices.
-///
-/// The fingerprint is stable across runs so repeated discovery does not look like a new device
-/// each time, and is deliberately not a certificate hash: nothing here accepts connections, so
-/// there is no certificate to hash.
 fn own_identity() -> Value {
     let receiving = receiver();
     json!({
@@ -80,7 +55,6 @@ fn own_identity() -> Value {
         "deviceType": "desktop",
         "fingerprint": own_fingerprint(),
         "port": receiving.as_ref().map(|r| r.port()).unwrap_or(PORT),
-        // Only claim HTTPS when there is actually a server holding that certificate.
         "protocol": if receiving.is_some() { "https" } else { "http" },
         "download": false,
     })
@@ -95,10 +69,8 @@ fn alias() -> String {
 }
 
 fn own_fingerprint() -> String {
-    // The announced fingerprint has to hash the certificate this machine actually presents, at
-    // both ends: a peer pins it when it sends to us, and checks the client certificate against it
-    // when we send to a peer. The derived value below is only a stand-in for a machine that could
-    // not load an identity at all.
+    // The announced fingerprint must hash the certificate we actually present: peers pin it both
+    // ways.
     if let Ok(identity) = cert::shared() {
         return identity.fingerprint.clone();
     }
@@ -111,11 +83,8 @@ fn own_fingerprint() -> String {
         .collect()
 }
 
-/// A socket bound to the LocalSend port that coexists with a running LocalSend app.
-///
-/// Multicast has to be received on the group's own port, so the address must be shared: without
-/// SO_REUSEADDR/SO_REUSEPORT this would fail outright whenever the desktop app is open, which is
-/// exactly when a user expects discovery to work.
+/// SO_REUSEADDR/SO_REUSEPORT: multicast is received on the group's own port, which the LocalSend
+/// app also holds.
 pub(crate) fn multicast_socket() -> Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .context("creating the discovery socket")?;
@@ -132,19 +101,14 @@ pub(crate) fn multicast_socket() -> Result<UdpSocket> {
     Ok(socket.into())
 }
 
-/// The running receiver. `None` means this daemon is not accepting transfers, which is a state
-/// the user can switch into: the LocalSend app cannot bind the port while we hold it, so being
-/// able to let go is what makes running the app instead possible.
 static RECEIVER: Mutex<Option<Arc<server::Receiver>>> = Mutex::new(None);
 
-/// How to start, remembered so receiving can be switched back on without passing settings again.
 static SETTINGS: OnceLock<(String, PathBuf)> = OnceLock::new();
 
 pub fn receiver() -> Option<Arc<server::Receiver>> {
     RECEIVER.lock().ok()?.clone()
 }
 
-/// Remember how to start, without starting.
 pub fn configure(config: &crate::config::Config) {
     let name = if config.localsend_alias.is_empty() {
         alias()
@@ -155,7 +119,6 @@ pub fn configure(config: &crate::config::Config) {
     let _ = SETTINGS.set((name, directory));
 }
 
-/// Start accepting transfers. A second call while already running is a no-op.
 pub fn start_receiver() -> Result<()> {
     let mut slot = RECEIVER
         .lock()
@@ -173,7 +136,6 @@ pub fn start_receiver() -> Result<()> {
     Ok(())
 }
 
-/// Stop accepting and release the port. Returns whether anything was running.
 pub fn stop_receiver() -> Result<bool> {
     let mut slot = RECEIVER
         .lock()
@@ -187,15 +149,10 @@ pub fn stop_receiver() -> Result<bool> {
     }
 }
 
-/// Whether discovery can run at all here.
 pub fn available() -> Result<()> {
     multicast_socket().map(|_| ())
 }
 
-/// Announce this machine and collect the devices that answer.
-///
-/// The announcement carries `announce: true`, which is what asks other devices to reply rather
-/// than merely noting we exist.
 pub fn devices() -> Result<Vec<Device>> {
     let socket = multicast_socket()?;
     let mut announcement = own_identity();
@@ -212,8 +169,6 @@ pub fn devices() -> Result<Vec<Device>> {
     while Instant::now() < deadline {
         let (read, from) = match socket.recv_from(&mut buffer) {
             Ok(result) => result,
-            // The read timeout is what paces this loop; anything else ends discovery early rather
-            // than spinning on a broken socket.
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(err) if err.kind() == std::io::ErrorKind::TimedOut => continue,
             Err(err) => return Err(err).context("reading LocalSend announcements"),
@@ -224,7 +179,6 @@ pub fn devices() -> Result<Vec<Device>> {
         if device.fingerprint == own {
             continue;
         }
-        // A device answers on every interface it can see, so the same one arrives more than once.
         if found
             .iter()
             .any(|seen| seen.fingerprint == device.fingerprint)
@@ -233,9 +187,8 @@ pub fn devices() -> Result<Vec<Device>> {
         }
         found.push(device);
     }
-    // The receiver hears devices this one-shot scan can miss: with it running, two sockets are
-    // bound to the discovery port and the kernel gives a unicast reply to only one of them, and
-    // some devices announce themselves over HTTP rather than multicast. Merge what it has heard.
+    // Merge what the receiver heard: with two sockets on the port the kernel delivers a unicast
+    // reply to only one, and some devices announce over HTTP.
     if let Some(receiver) = receiver() {
         for device in receiver.seen() {
             if !found
@@ -250,14 +203,13 @@ pub fn devices() -> Result<Vec<Device>> {
     Ok(found)
 }
 
-/// Turn one announcement datagram into a device, using the sender's address as its IP.
 fn parse_announcement(payload: &[u8], from: SocketAddr) -> Option<Device> {
     let value: Value = serde_json::from_slice(payload).ok()?;
     device_from_announcement(&value, from.ip(), PORT)
 }
 
-/// Build a device from an announcement body. The address comes from the connection rather than
-/// the payload, so a device cannot claim to be somewhere it is not.
+/// The address comes from the connection, not the payload, so a device cannot claim to be
+/// elsewhere.
 pub(crate) fn device_from_announcement(
     value: &Value,
     address: std::net::IpAddr,
@@ -307,7 +259,6 @@ pub(crate) fn device_from_announcement(
     })
 }
 
-/// Match a device by alias or fingerprint, case-insensitively.
 fn find(devices: Vec<Device>, wanted: &str) -> Result<Device> {
     let needle = wanted.trim().to_lowercase();
     let known: Vec<String> = devices.iter().map(|d| d.alias.clone()).collect();
@@ -328,7 +279,6 @@ fn find(devices: Vec<Device>, wanted: &str) -> Result<Device> {
         })
 }
 
-/// Send files to a device, named the way `devices` reports it.
 pub fn send(device: &str, files: &[String]) -> Result<Sent> {
     if files.is_empty() {
         bail!("no files given");
@@ -386,7 +336,6 @@ pub fn send(device: &str, files: &[String]) -> Result<Sent> {
     let mut sent = Vec::new();
     for (index, (path, name, _)) in prepared.iter().enumerate() {
         let id = index.to_string();
-        // A device may accept only some of the files it was offered.
         let Some(token) = tokens.get(&id).and_then(Value::as_str) else {
             continue;
         };
@@ -428,14 +377,12 @@ mod tests {
         assert_eq!(device.port, 53318);
         assert_eq!(device.protocol, "https");
         assert!(device.download);
-        // The IP comes from the datagram's source, never from the payload: a device cannot claim
-        // to be at an address it is not sending from.
+        // The IP comes from the datagram's source, never from the payload.
         assert_eq!(device.ip, "192.168.1.42");
     }
 
     #[test]
     fn a_device_without_a_fingerprint_is_ignored() {
-        // Without one there is nothing to pin TLS against and nothing to dedupe by.
         assert!(parse_announcement(br#"{"alias":"Phone"}"#, from()).is_none());
         assert!(parse_announcement(br#"{"alias":"P","fingerprint":""}"#, from()).is_none());
     }
@@ -449,7 +396,6 @@ mod tests {
     fn defaults_fill_in_for_a_terse_announcement() {
         let device = parse_announcement(br#"{"fingerprint":"ab12"}"#, from()).expect("parsed");
         assert_eq!(device.port, PORT);
-        // LocalSend defaults to HTTPS, so assuming plaintext would be the unsafe guess.
         assert_eq!(device.protocol, "https");
         assert_eq!(device.alias, "192.168.1.42");
     }
@@ -473,8 +419,6 @@ mod tests {
 
     #[test]
     fn our_own_fingerprint_is_stable_between_calls() {
-        // Discovery filters our own announcement out by fingerprint; if it changed per call we
-        // would list ourselves as a peer.
         assert_eq!(own_fingerprint(), own_fingerprint());
         assert_eq!(own_fingerprint().len(), 64);
     }

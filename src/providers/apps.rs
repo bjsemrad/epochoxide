@@ -207,11 +207,8 @@ impl Provider for AppsProvider {
     }
 }
 
-/// Desktop entry directories, in precedence order. XDG_DATA_DIRS is honoured when present, but
-/// a service started by systemd frequently inherits a near-empty environment (no XDG_DATA_DIRS
-/// at all), which would silently reduce the app list — and every icon derived from it, including
-/// window icons — to whatever lives under XDG_DATA_HOME. The profile locations below are probed
-/// unconditionally for that case; missing ones are skipped.
+/// Profile locations are probed unconditionally: under systemd XDG_DATA_DIRS is often unset, which
+/// would shrink the app list (and every icon) to XDG_DATA_HOME.
 fn application_dirs() -> Vec<PathBuf> {
     let mut bases = Vec::new();
     if let Some(data_home) = dirs::data_dir() {

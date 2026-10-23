@@ -1,9 +1,3 @@
-//! mango, over its IPC socket (the protocol `mmsg` speaks).
-//!
-//! mango is dwl-derived, so it has tags rather than workspaces: every monitor carries its own
-//! numbered set, and a window can sit on several at once. Each (monitor, tag) pair is reported as
-//! one workspace named by its number, the way niri reports per-output workspaces by index.
-
 use super::ipc::{mango_request, mango_watch};
 use super::{Compositor, Monitor, Window, WindowRegion, Workspace};
 use anyhow::Result;
@@ -94,8 +88,6 @@ impl Compositor for Mango {
         )
     }
 
-    /// mango reports client geometry in the global output layout, and says outright which
-    /// clients are on a tag someone is looking at.
     fn window_regions(&self) -> Option<Vec<WindowRegion>> {
         Some(
             clients()?
@@ -117,8 +109,6 @@ impl Compositor for Mango {
         )
     }
 
-    /// `focusid` switches to the client's tag and monitor as well, so a window on a hidden tag
-    /// can be focused from the bar.
     fn focus_window(&self, handle: &str) -> Result<()> {
         dispatch(&format!("focusid client,{}", client_id(handle)?))
     }
@@ -127,8 +117,6 @@ impl Compositor for Mango {
         dispatch(&format!("killclient client,{}", client_id(handle)?))
     }
 
-    /// `monitor:tag` from a workspace id, or a bare tag number from a keybinding, which acts on
-    /// the focused monitor the way mango's own `view` binding does.
     fn focus_workspace(&self, handle: &str) -> Result<()> {
         dispatch(&workspace_dispatch(handle)?)
     }
@@ -149,8 +137,7 @@ fn workspace_dispatch(handle: &str) -> Result<String> {
         .filter(|tag| *tag > 0)
         .ok_or_else(|| anyhow::anyhow!("mango tags are numbered from 1, not \"{tag}\""))?;
     Ok(match monitor {
-        // The monitor is matched as a regex, so anchor it: "DP-1" would otherwise also match
-        // "eDP-1".
+        // Matched as a regex, so anchored: "DP-1" would also match "eDP-1".
         Some(monitor) => format!("viewcrossmon,{tag},^{}$", regex_escape(monitor)),
         None => format!("view,{tag},0"),
     })
@@ -172,8 +159,6 @@ fn client_id(handle: &str) -> Result<u32> {
         .map_err(|_| anyhow::anyhow!("\"{handle}\" is not a mango client id"))
 }
 
-/// Run a dispatch. mango answers `{"success":true}` when it found the function (and client), and
-/// an `error` otherwise.
 fn dispatch(command: &str) -> Result<()> {
     let reply = mango_request(&format!("dispatch {command}"))
         .ok_or_else(|| anyhow::anyhow!("mango is not answering"))?;
@@ -186,8 +171,6 @@ fn dispatch(command: &str) -> Result<()> {
     }
 }
 
-/// The tag a window is shown under. A window on several tags is listed under the one being
-/// viewed on its monitor if there is one, and otherwise its lowest, so it appears once.
 fn client_tag(client: &Value, monitor: &str, active: &[(String, Vec<i64>)]) -> Option<i64> {
     let tags: Vec<i64> = client
         .get("tags")

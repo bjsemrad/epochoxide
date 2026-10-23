@@ -1,51 +1,27 @@
-//! CPU power state.
-//!
-//! Read-only, and deliberately so. What a laptop is doing about power is worth showing; changing
-//! it is a different problem, because whatever daemon is managing the CPU will simply put its own
-//! decision back a few seconds later unless it is asked through its own override. Reporting needs
-//! none of that.
-//!
-//! Everything here comes from sysfs, which means no daemon has to be installed and nothing needs
-//! root. The managing daemon is identified only so a caller can say *who* is deciding -- the
-//! numbers are true whether or not anything is managing them.
-
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
 
-/// The normalized profile, and the raw knobs it was read from.
-///
-/// The raw fields are kept alongside the normalized name because they are what someone actually
-/// debugging a warm laptop wants to see, and because "balanced" means nothing on its own.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Power {
     pub available: bool,
     pub reason: Option<String>,
-    /// `performance`, `balanced`, `power-saver`, or empty when the knobs do not describe one.
     pub profile: String,
     pub governor: String,
     pub governors: Vec<String>,
-    /// intel_pstate's energy/performance preference, empty where the driver has none.
     pub energy_preference: String,
     pub energy_preferences: Vec<String>,
-    /// Whether turbo/boost is allowed. `None` when the machine exposes no such knob.
     pub turbo: Option<bool>,
     pub driver: String,
-    /// The daemon deciding all this: `auto-cpufreq`, `power-profiles-daemon`, `tuned`, or empty
-    /// when nothing is managing the CPU.
     pub manager: String,
-    /// The ACPI platform profile, on machines that expose one.
     pub platform_profile: Option<String>,
     pub platform_profiles: Vec<String>,
-    /// Always false in this build: nothing here changes anything.
     pub can_switch: bool,
 }
 
 const CPU0: &str = "/sys/devices/system/cpu/cpu0/cpufreq";
 const PLATFORM_PROFILE: &str = "/sys/firmware/acpi/platform_profile";
 
-/// Daemons that manage CPU frequency, in the order they are reported when several are somehow
-/// running at once.
 const MANAGERS: &[&str] = &["auto-cpufreq", "power-profiles-daemon", "tuned"];
 
 pub fn available() -> Result<(), String> {
@@ -84,11 +60,6 @@ pub fn status() -> Power {
     }
 }
 
-/// Reduce the governor and the energy preference to one word.
-///
-/// The two together are what a person means by "power profile": `performance` says the CPU will
-/// not clock down, while `powersave` is the governor every laptop idles at and says nothing on its
-/// own -- what separates balanced from frugal there is the energy preference.
 fn profile(governor: &str, energy_preference: &str) -> String {
     match (governor, energy_preference) {
         ("performance", _) => "performance".into(),
@@ -101,7 +72,6 @@ fn profile(governor: &str, energy_preference: &str) -> String {
     }
 }
 
-/// Whether turbo is allowed. Intel spells it as an inversion, everyone else as a boost flag.
 fn turbo() -> Option<bool> {
     let intel = read("/sys/devices/system/cpu/intel_pstate/no_turbo");
     if !intel.is_empty() {
@@ -114,7 +84,6 @@ fn turbo() -> Option<bool> {
     None
 }
 
-/// Which daemon is managing the CPU, if any. One systemctl call answers for all of them.
 fn manager() -> String {
     let Ok(output) = Command::new("systemctl")
         .arg("is-active")
@@ -123,8 +92,8 @@ fn manager() -> String {
     else {
         return String::new();
     };
-    // `is-active` prints one line per unit, in the order they were asked for, and exits non-zero
-    // when any of them is inactive -- which is the normal case here, so the status is ignored.
+    // `is-active` exits non-zero when any unit is inactive, the normal case here, so the status is
+    // ignored.
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .zip(MANAGERS)
@@ -155,12 +124,10 @@ mod tests {
 
     #[test]
     fn powersave_is_decided_by_the_energy_preference() {
-        // Every laptop idles at the powersave governor; on its own it says nothing about intent.
         assert_eq!(profile("powersave", "balance_performance"), "balanced");
         assert_eq!(profile("powersave", "default"), "balanced");
         assert_eq!(profile("powersave", "balance_power"), "power-saver");
         assert_eq!(profile("powersave", "power"), "power-saver");
-        // A driver pinned to maximum through the preference is not saving anything.
         assert_eq!(profile("powersave", "performance"), "performance");
     }
 

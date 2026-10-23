@@ -1,15 +1,3 @@
-//! What machine this is, and how its battery and firmware are doing.
-//!
-//! Framework laptops are the target this was written against, but almost nothing here is specific
-//! to them: DMI names the vendor, sysfs reports battery wear, and fwupd knows about firmware on any
-//! machine that runs it. Detection exists so a caller can say "Framework Laptop 13" instead of
-//! nothing, not to gate features behind a vendor.
-//!
-//! What *is* Framework-specific turned out to need root: the charge limit lives in the embedded
-//! controller, reachable through `/dev/cros_ec`, which is `crw------- root root`. Rather than ask
-//! for a polkit prompt to read a number, this reports the standard sysfs thresholds when a machine
-//! exposes them and says nothing when it does not.
-
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,11 +6,6 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// The terminal to run privileged, interactive commands in, taken from the daemon's own config.
-///
-/// It is stored at startup rather than read on demand: an API handler that reloads config from the
-/// default path ignores whatever the running daemon was actually started with, which is how a test
-/// against a stubbed terminal opened a real one and started a real firmware update.
 static TERMINAL: OnceLock<String> = OnceLock::new();
 
 pub fn configure(config: &crate::config::Config) {
@@ -43,20 +26,16 @@ pub struct Hardware {
     pub family: String,
     pub board: String,
     pub bios_version: String,
-    /// The running kernel, from /proc.
     pub kernel: String,
-    /// True when DMI says Framework, so a caller can offer vendor-specific help without guessing.
     pub framework: bool,
     pub battery: Option<Battery>,
 }
 
-/// Battery wear, which is the number people actually want and no desktop shows.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Battery {
     pub name: String,
     pub manufacturer: String,
     pub model: String,
-    /// Full charge now against full charge when new, as a percentage. 100 means no measurable wear.
     pub health: Option<u32>,
     pub cycle_count: Option<u32>,
     /// µAh or µWh depending on what the battery reports; `unit` says which.
@@ -65,13 +44,12 @@ pub struct Battery {
     pub unit: String,
     pub capacity: Option<u32>,
     pub status: String,
-    /// Charge thresholds, on machines that expose them through sysfs. Framework's live in the EC
-    /// behind a root-only device, so they are absent there.
+    /// Framework keeps charge thresholds in the EC behind a root-only device, so they are absent
+    /// there.
     pub charge_start_threshold: Option<u32>,
     pub charge_end_threshold: Option<u32>,
 }
 
-/// A firmware update fwupd is offering.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FirmwareUpdate {
     pub name: String,
@@ -84,7 +62,6 @@ pub struct Firmware {
     pub available: bool,
     pub reason: Option<String>,
     pub updates: Vec<FirmwareUpdate>,
-    /// When this was last asked, and whether the answer came from the cache.
     pub checked_at: i64,
     pub cached: bool,
 }
@@ -107,8 +84,6 @@ fn dmi(field: &str) -> String {
     read(&format!("{DMI}/{field}"))
 }
 
-/// The first battery the machine reports. A laptop with two is rare enough that naming one is
-/// better than inventing a way to talk about both.
 fn battery() -> Option<Battery> {
     let directory = std::fs::read_dir(POWER_SUPPLY)
         .ok()?
@@ -120,8 +95,6 @@ fn battery() -> Option<Battery> {
     let at = |field: &str| read(&format!("{}/{field}", directory.display()));
     let number = |field: &str| at(field).parse::<u64>().ok();
 
-    // A battery reports either charge (µAh) or energy (µWh); which one is not a choice anybody
-    // made, so both are read and the unit is passed on rather than converted.
     let (full, design_full, unit) = match (number("charge_full"), number("charge_full_design")) {
         (Some(full), design) => (Some(full), design, "µAh"),
         _ => (number("energy_full"), number("energy_full_design"), "µWh"),
@@ -146,8 +119,6 @@ fn battery() -> Option<Battery> {
     })
 }
 
-/// Wear, rounded to a percentage. A battery that reports a fuller charge than it shipped with is
-/// reported as 100 rather than 103: the extra is measurement drift, not capacity.
 fn health(full: Option<u64>, design: Option<u64>) -> Option<u32> {
     let (full, design) = (full?, design?);
     if design == 0 {
@@ -163,10 +134,6 @@ fn read(path: &str) -> String {
         .unwrap_or_default()
 }
 
-// --- Firmware -----------------------------------------------------------------
-
-/// How long a firmware answer is reused. `fwupdmgr` takes a second or two and talks to a daemon;
-/// nothing about firmware changes faster than this.
 const FIRMWARE_CACHE: Duration = Duration::from_secs(600);
 
 static FIRMWARE: Mutex<Option<(Instant, Firmware)>> = Mutex::new(None);
@@ -179,8 +146,6 @@ pub fn firmware_available() -> Result<(), String> {
     }
 }
 
-/// What fwupd is offering. `refresh` skips the cache; it does not download new metadata, which is
-/// a privileged, network-bound operation and the user's own to start.
 pub fn firmware(refresh: bool) -> Result<Firmware> {
     if let Err(reason) = firmware_available() {
         return Ok(Firmware {
@@ -205,7 +170,7 @@ pub fn firmware(refresh: bool) -> Result<Firmware> {
         .args(["get-updates", "--json"])
         .output()
         .context("running fwupdmgr")?;
-    // fwupdmgr exits non-zero when there is simply nothing to update, which is not a failure.
+    // fwupdmgr exits non-zero when there is simply nothing to update.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: Value = match serde_json::from_str(stdout.trim()) {
         Ok(value) => value,
@@ -227,7 +192,6 @@ pub fn firmware(refresh: bool) -> Result<Firmware> {
             devices
                 .iter()
                 .filter_map(|device| {
-                    // A device with no release on offer is listed but has nothing to install.
                     let release = device.get("Releases").and_then(Value::as_array)?.first()?;
                     Some(FirmwareUpdate {
                         name: string(device, "Name"),
@@ -252,11 +216,6 @@ pub fn firmware(refresh: bool) -> Result<Firmware> {
     Ok(answer)
 }
 
-/// Start `fwupdmgr update` in a terminal.
-///
-/// In a terminal because it asks for a password through polkit, lists what it is about to flash,
-/// and often ends by asking for a reboot -- none of which can happen behind a panel. Nothing here
-/// flashes anything itself; it opens the tool and gets out of the way.
 pub fn update_firmware() -> Result<String> {
     if let Err(reason) = firmware_available() {
         bail!("{reason}");
@@ -279,7 +238,6 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Where a battery lives, for tests that need a path rather than a machine.
 #[allow(dead_code)]
 fn power_supply(name: &str) -> PathBuf {
     Path::new(POWER_SUPPLY).join(name)
@@ -297,7 +255,6 @@ mod tests {
 
     #[test]
     fn a_battery_reporting_more_than_its_design_is_not_over_a_hundred() {
-        // Measurement drift, not extra capacity.
         assert_eq!(health(Some(4_100_000), Some(3_915_000)), Some(100));
     }
 
@@ -310,7 +267,6 @@ mod tests {
 
     #[test]
     fn framework_is_recognised_from_the_vendor_string() {
-        // The real check reads DMI; this pins the rule that decides it.
         assert!("Framework".to_lowercase().contains("framework"));
         assert!(!"LENOVO".to_lowercase().contains("framework"));
     }

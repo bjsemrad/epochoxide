@@ -43,8 +43,6 @@ impl LazyFilesProvider {
     }
 }
 
-/// The index is only built when the user asked for it, or when fd is missing and it is the only
-/// way to answer at all. See [`FileIndex`] for the trade it makes.
 fn wants_index(config: &Config) -> bool {
     match config.file_index {
         FileIndex::Always => true,
@@ -62,15 +60,12 @@ impl Provider for LazyFilesProvider {
     }
 
     fn query(&mut self, query: &str, limit: usize, exact: bool) -> Vec<Item> {
-        // try_lock, not lock: a keystroke that lands while the watcher is draining should fall
-        // back to fd rather than stall behind it.
+        // try_lock: a keystroke while the watcher drains falls back to fd instead of stalling.
         if let Ok(mut inner) = self.inner.try_lock() {
             if let Some(provider) = inner.as_mut() {
                 return provider.query(query, limit, exact);
             }
         }
-        // Reached while the index is still loading, or when it was never asked for. fd_query is
-        // already empty-safe when fd is missing, which is the documented cost of `never`.
         fd_query(&self.config, query, limit, exact)
     }
 
@@ -81,8 +76,6 @@ impl Provider for LazyFilesProvider {
         query: &str,
         arguments: &str,
     ) -> Result<()> {
-        // Blocking is right here where it is wrong in query: activation is a one-shot the user is
-        // waiting on, and skipping it because the index happened to be busy silently does nothing.
         let mut inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
         match inner.as_mut() {
             Some(provider) => provider.activate(identifier, action, query, arguments),
@@ -380,12 +373,10 @@ impl FilesProvider {
     }
 }
 
-/// Matching against the whole path means every file under a matching directory scores identically
-/// off that one directory name, so a query like "proj" buries the files actually called that under
-/// everything in ~/projects. Lift matches that land in the entry's own name above those.
+/// Whole-path matching scores every file under a matching directory the same; lift matches in the
+/// entry's own name.
 fn name_match_bonus(search: &str, start: usize) -> i32 {
-    // fd prints directories with a trailing slash, which would otherwise make every directory's
-    // own name look like an ancestor component and cost it the bonus.
+    // fd prints directories with a trailing slash.
     let path = search.strip_suffix('/').unwrap_or(search);
     let name_start = path.rfind('/').map(|slash| slash + 1).unwrap_or(0);
     if start >= name_start {
@@ -531,8 +522,8 @@ fn fd_query(config: &Config, query: &str, limit: usize, exact: bool) -> Vec<Item
         "--type",
         "directory",
     ]);
-    // Bare names are gitignore-style globs fd can prune the walk with; the rooted entries are
-    // left to is_ignored_path below, since fd anchors a slash-bearing glob to the search root.
+    // fd anchors a slash-bearing glob to the search root, so rooted entries are left to
+    // is_ignored_path.
     for dir in ignored.iter().filter(|dir| !dir.contains('/')) {
         command.args(["--exclude", dir]);
     }
@@ -577,10 +568,8 @@ fn fd_query(config: &Config, query: &str, limit: usize, exact: bool) -> Vec<Item
     items
 }
 
-/// fd matches its pattern against the basename only, so an unqualified query like "epoch" finds
-/// the directories named that way but none of the files inside them. `--full-path` matches the
-/// whole path instead, which is what the in-process index has always scored against; the pattern
-/// is a regex there, so the query has to be escaped to stay the literal text the user typed.
+/// fd matches basenames only, so `--full-path` (regex, hence escaped) to match the whole path like
+/// the index does.
 fn fd_pattern(query: &str) -> String {
     query
         .chars()
@@ -778,7 +767,6 @@ mod tests {
 
     #[test]
     fn fd_pattern_matches_paths_not_just_basenames() {
-        // "epoch" has to reach /home/me/EpochOxide/src/main.rs, not only the directory itself.
         assert_eq!(super::fd_pattern("epoch"), "epoch");
         assert_eq!(super::fd_pattern("src/main"), "src/main");
     }
@@ -808,7 +796,6 @@ mod tests {
         let own_name = super::name_match_bonus("/home/me/src/projects.rs", 13);
         assert_eq!(dir_only, 0);
         assert!(own_name > dir_only);
-        // fd prints directories with a trailing slash; the bonus has to survive it.
         assert_eq!(super::name_match_bonus("/home/me/notes/", 9), own_name);
     }
 
@@ -829,7 +816,6 @@ mod tests {
         };
         assert!(super::wants_index(&always));
         assert!(!super::wants_index(&never));
-        // Auto tracks fd: it indexes exactly when fd cannot answer for it.
         assert_eq!(super::wants_index(&auto), super::fd_program().is_none());
     }
 

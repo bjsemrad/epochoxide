@@ -1,5 +1,3 @@
-//! X11 via wmctrl. The last resort: windows only, with no workspace, monitor, or focus data.
-
 use super::ipc::{command_output, run};
 use super::{Compositor, Window};
 use anyhow::Result;
@@ -33,7 +31,6 @@ impl Compositor for Wmctrl {
     }
 }
 
-/// `wmctrl -lx` is columnar: id, desktop, class, host, then the title, which may contain spaces.
 fn parse(line: &str) -> Option<Window> {
     let mut parts = line.split_whitespace();
     let id = parts.next()?.to_string();
@@ -49,7 +46,6 @@ fn parse(line: &str) -> Option<Window> {
         monitor: String::new(),
         focused: false,
         floating: false,
-        // `wmctrl -lx` carries no geometry, so ordering falls back to the listing order.
         x: 0,
         y: 0,
         width: 0,

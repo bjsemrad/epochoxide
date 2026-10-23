@@ -1,6 +1,3 @@
-//! Low-level ways to reach a compositor: sockets, CLIs, and the environment hints that locate
-//! them. Nothing here knows what a window is; the backends build on it.
-
 use anyhow::{Context, Result};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -24,7 +21,6 @@ pub fn command_output(program: &str, args: &[&str]) -> Option<String> {
     output(command)
 }
 
-/// Run a shell command, failing if it exits non-zero.
 pub fn run(command: &str) -> Result<()> {
     let status = std::process::Command::new("sh")
         .arg("-c")
@@ -37,10 +33,6 @@ pub fn run(command: &str) -> Result<()> {
     }
 }
 
-// --- Hyprland ---------------------------------------------------------------
-
-/// A `hyprctl` carrying the instance signature, for a daemon started without one in its
-/// environment.
 pub fn hyprctl() -> std::process::Command {
     let mut command = std::process::Command::new("hyprctl");
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
@@ -57,8 +49,7 @@ pub fn hypr_output(args: &[&str]) -> Option<String> {
     output(command)
 }
 
-/// Whether a Hyprland is actually answering. The socket file alone proves nothing: one from a
-/// session that has since ended stays in the runtime directory, so this connects.
+/// The socket file alone proves nothing: a dead session's socket stays in the runtime directory.
 pub fn hypr_running() -> bool {
     hypr_ipc("version").is_some()
 }
@@ -80,21 +71,13 @@ pub fn hypr_ipc(command: &str) -> Option<String> {
     }
 }
 
-/// True only when Hyprland answered `ok`; every failure path (Lua syntax error, unknown window,
-/// unreachable compositor) answers with something else.
 pub fn hypr_send(args: &[&str]) -> bool {
     let reply = hypr_ipc(&args.join(" ")).or_else(|| hypr_output(args));
     reply.is_some_and(|reply| reply.trim() == "ok")
 }
 
-/// Focus/close a window by address, whichever config flavour Hyprland was started with.
-///
-/// A Hyprland started from a Lua config runs `dispatch` through Lua, so the classic
-/// `dispatch focuswindow address:0x…` arrives as `hl.dispatch(focuswindow address:0x…)` and dies
-/// on a syntax error — one that still comes back as a normal (non-empty) reply, so it has to be
-/// told apart from the plain `ok` a real dispatch answers with. The classic form goes first
-/// because it is the only one older Hyprlands understand; the Lua fallback looks the window
-/// object up by address and dispatches against it.
+/// Under a Lua config, the classic dispatch arrives as a Lua syntax error that still returns a
+/// non-`ok` reply; classic first (older Hyprlands), then a Lua lookup by address.
 pub fn hypr_window_dispatch(dispatcher: &str, lua_dispatch: &str, address: &str) -> Result<()> {
     if hypr_send(&["dispatch", dispatcher, &format!("address:{address}")]) {
         return Ok(());
@@ -108,13 +91,6 @@ pub fn hypr_window_dispatch(dispatcher: &str, lua_dispatch: &str, address: &str)
     anyhow::bail!("hyprland rejected {dispatcher} for {address}")
 }
 
-/// Switch to a workspace by id, or by `name:` for a named one. A workspace that does not exist
-/// yet is created, matching what the classic dispatcher does.
-///
-/// Same Lua-config problem as [`hypr_window_dispatch`], with one extra trap: the `hl.dsp.*`
-/// helpers *build* a dispatcher object rather than running one, so the result has to be handed to
-/// `hl.dispatch()`. Passing the dispatcher string straight to `hl.dispatch("workspace 3")` is
-/// accepted and answers `ok` while silently doing nothing, so it cannot be used as a shortcut.
 pub fn hypr_workspace_dispatch(handle: &str) -> Result<()> {
     // Hyprland reads a bare number as a workspace id and anything else as a name.
     let numeric = handle.parse::<i64>().ok();
@@ -127,8 +103,6 @@ pub fn hypr_workspace_dispatch(handle: &str) -> Result<()> {
     }
     let lua = match numeric {
         Some(id) => format!("hl.dispatch(hl.dsp.focus({{ workspace = {id} }})) return \"ok\""),
-        // A named workspace has to be looked up as an object; there is no name form of the
-        // dispatcher argument.
         None => format!(
             "for _, w in ipairs(hl.get_workspaces()) do if tostring(w.name) == {name} then hl.dispatch(hl.dsp.focus({{ workspace = w }})) return \"ok\" end end return \"no workspace\"",
             name = lua_string(handle)
@@ -140,21 +114,15 @@ pub fn hypr_workspace_dispatch(handle: &str) -> Result<()> {
     anyhow::bail!("hyprland rejected workspace \"{handle}\"")
 }
 
-/// Quote a value as a Lua string literal.
 fn lua_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Hyprland's event socket. Every line is `EVENT>>payload`, handed on as it is.
-///
-/// Mostly the line only says *that* something changed, which is all a re-read needs. The backend
-/// reads the few events that carry state no query reports (see `hyprland::note_event`).
 pub fn hypr_watch(on_event: &mut dyn FnMut(&str) -> anyhow::Result<()>) -> Result<()> {
     let socket = hypr_event_socket_path()
         .ok_or_else(|| anyhow::anyhow!("hyprland event socket not found"))?;
     let stream = UnixStream::connect(socket).context("connecting to the hyprland event socket")?;
     for line in BufReader::new(stream).lines() {
-        // A read error means Hyprland went away; ending the watch lets the caller reconnect.
         let Ok(line) = line else { break };
         on_event(&line)?;
     }
@@ -205,8 +173,6 @@ fn hypr_signature() -> Option<String> {
     latest.map(|(_, sig)| sig)
 }
 
-// --- niri -------------------------------------------------------------------
-
 pub fn niri_output(args: &[&str]) -> Option<String> {
     let mut command = std::process::Command::new("niri");
     command.args(args);
@@ -218,7 +184,6 @@ pub fn niri_output(args: &[&str]) -> Option<String> {
     output(command)
 }
 
-/// A `niri` invocation carrying the socket, for use inside a shell command.
 pub fn niri_shell() -> String {
     niri_socket()
         .map(|socket| format!("NIRI_SOCKET={} niri", shell_quote(&socket)))
@@ -250,9 +215,6 @@ fn runtime_dir() -> String {
         .unwrap_or_else(|_| "/run/user/1000".into())
 }
 
-/// niri's event stream: connect, ask for it, then every line is one event.
-///
-/// As with Hyprland, the event bodies are ignored -- they only signal that a re-read is due.
 pub fn niri_watch(on_event: &mut dyn FnMut() -> anyhow::Result<()>) -> Result<()> {
     let socket = niri_socket().ok_or_else(|| anyhow::anyhow!("niri socket not found"))?;
     let mut stream = UnixStream::connect(socket).context("connecting to the niri socket")?;
@@ -265,10 +227,6 @@ pub fn niri_watch(on_event: &mut dyn FnMut() -> anyhow::Result<()>) -> Result<()
     Ok(())
 }
 
-// --- mango ------------------------------------------------------------------
-
-/// One request on mango's IPC socket: a newline-terminated `mmsg`-style command (`get all-clients`,
-/// `dispatch view,3,0`), answered with a single JSON line before mango closes the connection.
 pub fn mango_request(command: &str) -> Option<String> {
     let mut stream = UnixStream::connect(mango_socket()?).ok()?;
     let timeout = Some(Duration::from_millis(300));
@@ -281,9 +239,6 @@ pub fn mango_request(command: &str) -> Option<String> {
     (!out.is_empty()).then(|| out.to_string())
 }
 
-/// mango's client stream. `watch all-clients` is pushed on every arrange, which covers windows
-/// opening, closing, moving, refocusing and every tag switch -- so it alone is enough to know a
-/// re-read is due. As elsewhere, the payload is ignored.
 pub fn mango_watch(on_event: &mut dyn FnMut() -> anyhow::Result<()>) -> Result<()> {
     let socket = mango_socket().ok_or_else(|| anyhow::anyhow!("mango socket not found"))?;
     let mut stream = UnixStream::connect(socket).context("connecting to the mango socket")?;
@@ -296,8 +251,8 @@ pub fn mango_watch(on_event: &mut dyn FnMut() -> anyhow::Result<()>) -> Result<(
     Ok(())
 }
 
-/// `MANGO_INSTANCE_SIGNATURE` is the socket path itself. A daemon started without it looks for
-/// the newest `mango-<pid>.sock` in the runtime directory instead.
+/// `MANGO_INSTANCE_SIGNATURE` is the socket path; without it, the newest `mango-<pid>.sock` is
+/// used.
 fn mango_socket() -> Option<PathBuf> {
     if let Ok(socket) = std::env::var("MANGO_INSTANCE_SIGNATURE") {
         if !socket.is_empty() {
@@ -332,8 +287,6 @@ mod tests {
 
     #[test]
     fn quotes_and_backslashes_cannot_break_out_of_the_literal() {
-        // The name reaches Lua inside a generated program, so an unescaped quote would be a
-        // syntax error at best and an injection at worst.
         assert_eq!(lua_string("a\"b"), "\"a\\\"b\"");
         assert_eq!(lua_string("a\\b"), "\"a\\\\b\"");
     }

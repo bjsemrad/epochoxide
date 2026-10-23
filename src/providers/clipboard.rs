@@ -32,11 +32,6 @@ struct Clip {
     pinned: bool,
 }
 
-/// Owns clipboard state behind a `Mutex` so both `Provider` calls (query/activate, driven by
-/// client requests) and the background watcher thread (driven by clipboard changes, independent
-/// of any client) can capture new clips. Without this, history only ever advanced when a client
-/// happened to be actively searching -- copying something while the launcher was closed (or just
-/// idle) was silently lost until the next search re-checked the clipboard.
 struct ClipboardStore {
     config: Config,
     items: Mutex<Vec<Clip>>,
@@ -142,8 +137,6 @@ impl ClipboardStore {
     }
 }
 
-/// Runs `wl-paste --watch` and emits one line per clipboard change. This mirrors Elephant's
-/// proven watcher path; the line is just a change signal, the real clipboard is read separately.
 fn spawn_watcher(store: Arc<ClipboardStore>) {
     thread::spawn(move || {
         let Ok(mut child) = Command::new("wl-paste")

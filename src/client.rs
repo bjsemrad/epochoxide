@@ -119,12 +119,6 @@ pub fn subscribe(
     }))
 }
 
-/// Like [`request`], but hands back the whole `{ok, data, error}` envelope instead of unwrapping
-/// `data` and turning `ok: false` into an error.
-///
-/// The API surface answers failures with a structured payload carrying a machine-readable `code`.
-/// Going through `request` would flatten that to the message string, so an `api` call would lose
-/// its code whenever a daemon happened to be running and keep it when one was not.
 pub fn request_envelope(socket: &str, payload: Value) -> Result<Option<Value>> {
     let mut client = match StreamClient::connect(socket) {
         Ok(client) => client,
@@ -140,10 +134,6 @@ pub fn request_envelope(socket: &str, payload: Value) -> Result<Option<Value>> {
     }
 }
 
-/// Open a streaming API method and hand back each payload as it arrives.
-///
-/// The first response is the subscription acknowledgement and is dropped; everything after it is
-/// one payload per line, for as long as the caller keeps reading.
 pub fn api_stream(
     socket: &str,
     method: &str,

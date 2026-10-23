@@ -1,5 +1,3 @@
-//! Sway (and i3-compatible trees), over `swaymsg`.
-
 use super::ipc::{command_output, run};
 use super::{Compositor, Monitor, Window, Workspace};
 use anyhow::Result;
@@ -106,7 +104,6 @@ fn string(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// Walk the tree, carrying the enclosing workspace name down to the windows inside it.
 fn collect(node: &Value, workspace: &str, out: &mut Vec<Window>) {
     let workspace = if string(node, "type").as_deref() == Some("workspace") {
         string(node, "name").unwrap_or_default()
@@ -177,7 +174,6 @@ mod tests {
         assert!(out.iter().all(|window| window.workspace == "3"));
         assert_eq!(out[0].id, "sway:11");
         assert!(out[0].focused);
-        // A floating node is still a window on that workspace.
         assert_eq!(out[2].app_id, "gnome-calculator");
     }
 

@@ -1,18 +1,3 @@
-//! A very small HTTP/1.1 client, with TLS pinned to a peer's announced fingerprint.
-//!
-//! LocalSend needs exactly two requests -- a JSON POST and a binary POST -- against devices on the
-//! local network that present self-signed certificates. A general HTTP client would bring
-//! redirects, cookies, compression and a trust store none of which apply here, so this speaks just
-//! enough of the protocol.
-//!
-//! Trust works the way LocalSend itself works: there is no CA. A device announces the SHA-256
-//! fingerprint of its certificate over multicast, and a connection is accepted only if the
-//! certificate presented hashes to that value. Accepting any certificate instead would let
-//! anything on the LAN impersonate a device and receive the files.
-//!
-//! That pinning runs both ways: LocalSend receivers ask the connecting client for a certificate,
-//! so this presents the same identity it announces rather than connecting anonymously.
-
 use super::cert;
 use anyhow::{anyhow, bail, Context, Result};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -23,20 +8,16 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Generous, because `prepare-upload` does not answer until a person accepts the transfer on the
-/// other device, and an upload of a large file holds the connection for as long as it takes.
+/// Generous: `prepare-upload` waits for a person to accept on the other device.
 const TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Where a request is going, and how it should be secured.
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
     pub https: bool,
-    /// The SHA-256 certificate fingerprint the device announced, hex encoded.
     pub fingerprint: String,
 }
 
-/// Accepts exactly one certificate: the one whose SHA-256 matches what the device announced.
 #[derive(Debug)]
 struct PinnedFingerprint {
     expected: Vec<u8>,
@@ -69,8 +50,7 @@ impl ServerCertVerifier for PinnedFingerprint {
         }
     }
 
-    // The certificate itself is pinned, so the signature checks below only need to confirm the
-    // peer holds the matching key; rustls' own verification does that.
+    // The certificate itself is pinned, so these only confirm the peer holds the matching key.
     fn verify_tls12_signature(
         &self,
         message: &[u8],
@@ -106,7 +86,6 @@ impl ServerCertVerifier for PinnedFingerprint {
     }
 }
 
-/// Turn a read timeout into the explanation it almost always has.
 fn waiting_hint(err: std::io::Error) -> anyhow::Error {
     use std::io::ErrorKind::{TimedOut, WouldBlock};
     if matches!(err.kind(), TimedOut | WouldBlock) {
@@ -144,7 +123,6 @@ fn request_bytes(path: &str, host: &str, content_type: &str, body: &[u8]) -> Vec
     out
 }
 
-/// Split a raw response into its status code and body.
 fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>)> {
     let split = raw
         .windows(4)
@@ -158,8 +136,7 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>)> {
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| anyhow!("device sent no status line"))?;
     let body = &raw[split + 4..];
-    // LocalSend answers with Transfer-Encoding: chunked rather than a Content-Length, so the body
-    // arrives wrapped in size prefixes that have to come off before it is JSON.
+    // LocalSend answers with Transfer-Encoding: chunked.
     let chunked = head
         .lines()
         .skip(1)
@@ -178,14 +155,12 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>)> {
     ))
 }
 
-/// Strip HTTP chunked framing: repeating `<hex size>CRLF<bytes>CRLF`, ending at a zero-size chunk.
 fn dechunk(body: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut rest = body;
     // A truncated final chunk is common when a device closes early; whatever arrived is kept.
     while let Some(line_end) = rest.windows(2).position(|w| w == b"\r\n") {
         let header = String::from_utf8_lossy(&rest[..line_end]);
-        // A chunk size may carry extensions after a semicolon.
         let size_text = header.split(';').next().unwrap_or("").trim();
         let Ok(size) = usize::from_str_radix(size_text, 16) else {
             bail!("device sent an unreadable chunk size \"{size_text}\"");
@@ -199,7 +174,6 @@ fn dechunk(body: &[u8]) -> Result<Vec<u8>> {
             break;
         }
         out.extend_from_slice(&rest[..size]);
-        // Step past the chunk and its trailing CRLF.
         rest = &rest[(size + 2).min(rest.len())..];
     }
     Ok(out)
@@ -214,7 +188,6 @@ impl Endpoint {
         Ok(stream)
     }
 
-    /// POST `body` to `path` and return the response body, failing on any non-2xx status.
     pub fn post(&self, path: &str, content_type: &str, body: &[u8]) -> Result<Vec<u8>> {
         let request = request_bytes(path, &self.host, content_type, body);
         let raw = if self.https {
@@ -245,10 +218,8 @@ impl Endpoint {
 
     fn exchange_tls(&self, request: &[u8]) -> Result<Vec<u8>> {
         let verifier = Arc::new(PinnedFingerprint::new(&self.fingerprint)?);
-        // LocalSend's receiver requests a client certificate, and TLS 1.3 answers an empty one
-        // with a "certificate required" alert -- which is what a send failed with before this
-        // was sent. It has to be the certificate whose fingerprint the announcement carried,
-        // since that is the identity the peer records the transfer against.
+        // The receiver requests a client certificate (TLS 1.3 rejects an empty one), and it must be
+        // the one whose fingerprint we announced.
         let identity = cert::shared().context("loading this device's LocalSend certificate")?;
         let config =
             ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -258,8 +229,7 @@ impl Endpoint {
                 .with_client_auth_cert(identity.chain()?, identity.key()?)
                 .context("presenting this device's certificate")?;
 
-        // The certificate is self-signed and carries no useful name, so the SNI value is
-        // irrelevant to trust here -- the fingerprint check above is what decides.
+        // Self-signed with no useful name: SNI is irrelevant; the fingerprint decides trust.
         let name = ServerName::try_from("localsend")
             .map_err(|_| anyhow!("could not build a server name"))?;
         let connection = ClientConnection::new(Arc::new(config), name)?;
@@ -267,8 +237,7 @@ impl Endpoint {
         tls.write_all(request)?;
         tls.flush()?;
         let mut raw = Vec::new();
-        // A device closing the connection without a clean TLS shutdown is normal here; whatever
-        // arrived before that is still a complete response.
+        // A device closing without a clean TLS shutdown is normal here.
         match tls.read_to_end(&mut raw) {
             Ok(_) => {}
             Err(_) if !raw.is_empty() => {}
@@ -290,8 +259,7 @@ mod tests {
 
     #[test]
     fn an_unusable_fingerprint_is_refused_rather_than_ignored() {
-        // A short or non-hex fingerprint must not silently become an empty expectation, which
-        // would match nothing -- or worse, be treated as "no pinning".
+        // A short or non-hex fingerprint must not silently become "no pinning".
         assert!(decode_hex("abc").is_none());
         assert!(decode_hex("zz").is_none());
         assert!(PinnedFingerprint::new("nonsense!").is_err());
@@ -307,7 +275,6 @@ mod tests {
 
     #[test]
     fn a_chunked_body_is_unwrapped() {
-        // LocalSend answers this way; without dechunking the size prefixes end up inside the JSON.
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
         let (status, body) = parse_response(raw).unwrap();
         assert_eq!(status, 200);

@@ -1,28 +1,15 @@
-//! This device's LocalSend identity: a self-signed certificate and the fingerprint derived from
-//! it.
-//!
-//! The fingerprint a device announces *is* its identity in LocalSend -- peers pin it. So the
-//! certificate has to be generated once and kept, not regenerated per run: a new one every start
-//! would look like a brand new device each time and invalidate any pinning a peer had done.
-
 use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub struct Identity {
-    /// PEM-encoded certificate.
     pub certificate_pem: String,
-    /// PEM-encoded private key.
     pub key_pem: String,
-    /// SHA-256 of the certificate DER, uppercase hex -- the form LocalSend announces.
     pub fingerprint: String,
 }
 
 impl Identity {
-    /// The certificate as rustls wants it. Both ends need this: the receiver presents it to
-    /// senders, and a sender presents the very same one when a peer asks for a client
-    /// certificate.
     pub fn chain(&self) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
         let der = der_from_pem(&self.certificate_pem)
             .ok_or_else(|| anyhow!("could not read the certificate"))?;
@@ -37,11 +24,6 @@ impl Identity {
     }
 }
 
-/// The identity, loaded once and shared.
-///
-/// Every outbound request needs it now that connections carry a client certificate, and reading
-/// two files off disk per upload -- or worse, racing two threads into generating a fresh identity
-/// on first use -- is not worth it.
 static IDENTITY: Mutex<Option<Arc<Identity>>> = Mutex::new(None);
 
 pub fn shared() -> Result<Arc<Identity>> {
@@ -62,7 +44,6 @@ fn state_dir() -> PathBuf {
         .join("epochoxide")
 }
 
-/// Load the stored identity, generating and saving one the first time.
 pub fn load_or_create() -> Result<Identity> {
     let dir = state_dir();
     let cert_path = dir.join("localsend-cert.pem");
@@ -83,8 +64,6 @@ pub fn load_or_create() -> Result<Identity> {
 
     let mut params = rcgen::CertificateParams::new(vec!["localsend".to_string()])
         .context("building certificate parameters")?;
-    // LocalSend's own certificates carry this subject; nothing verifies it, since trust is the
-    // fingerprint, but matching keeps us unremarkable to other implementations.
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, "LocalSend User");
@@ -118,7 +97,6 @@ fn restrict(path: &std::path::Path) {
     }
 }
 
-/// SHA-256 of the certificate's DER bytes, uppercase hex.
 pub fn fingerprint_of(certificate_pem: &str) -> Result<String> {
     let der = der_from_pem(certificate_pem).context("reading the certificate")?;
     let digest = ring::digest::digest(&ring::digest::SHA256, &der);
@@ -129,8 +107,6 @@ pub fn fingerprint_of(certificate_pem: &str) -> Result<String> {
         .collect())
 }
 
-/// Strip the PEM armour and decode the base64 body. The label is not checked: these files are
-/// written by us and hold exactly one object each.
 pub fn der_from_pem(pem: &str) -> Option<Vec<u8>> {
     let body: String = pem
         .lines()
@@ -140,8 +116,6 @@ pub fn der_from_pem(pem: &str) -> Option<Vec<u8>> {
     base64_decode(body.trim())
 }
 
-/// Minimal base64 decoder. Pulling a crate in for one 20-line function that only ever sees
-/// well-formed PEM would be more dependency than it is worth.
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::with_capacity(input.len() / 4 * 3);
@@ -170,7 +144,6 @@ mod tests {
     fn base64_round_trips_a_known_value() {
         assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
         assert_eq!(base64_decode("aGVsbG8h").unwrap(), b"hello!");
-        // PEM bodies arrive wrapped across lines.
         assert_eq!(base64_decode("aGVs\nbG8=").unwrap(), b"hello");
     }
 
@@ -180,7 +153,6 @@ mod tests {
         let key = rcgen::KeyPair::generate().unwrap();
         let certificate = params.self_signed(&key).unwrap();
         let fingerprint = fingerprint_of(&certificate.pem()).unwrap();
-        // 32 bytes as uppercase hex, which is the shape LocalSend announces.
         assert_eq!(fingerprint.len(), 64);
         assert!(fingerprint
             .chars()
@@ -192,7 +164,6 @@ mod tests {
         let params = rcgen::CertificateParams::new(vec!["localsend".to_string()]).unwrap();
         let key = rcgen::KeyPair::generate().unwrap();
         let certificate = params.self_signed(&key).unwrap();
-        // What a peer hashes is the DER; our PEM decode must produce exactly that.
         let expected = ring::digest::digest(&ring::digest::SHA256, certificate.der());
         let expected_hex: String = expected
             .as_ref()

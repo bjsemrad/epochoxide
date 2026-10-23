@@ -1,23 +1,3 @@
-//! The Epoch API contract.
-//!
-//! One versioned, discoverable surface in front of everything EpochOxide knows that is not a
-//! launcher result. Methods are `group.method`, grouped by domain, and every group declares
-//! whether it is actually usable on this machine.
-//!
-//! Three rules hold across the whole surface:
-//!
-//! 1. **Normalized, not raw.** A caller never sees a `hyprctl` payload or a `tailscale status`
-//!    blob. Compositor and service details are mapped to stable shapes first, so a Hyprland
-//!    upgrade or a move to niri does not reach the UI.
-//! 2. **Discoverable.** `api.describe` reports the contract version, every group and method, and
-//!    the availability of each group, so a shell can feature-detect instead of guessing from
-//!    error strings.
-//! 3. **Typed failures.** Errors carry a machine-readable `code`, so a caller can tell "this
-//!    build has no such method" from "the compositor is not answering".
-//!
-//! Compatibility: the major version changes when an existing method's shape changes
-//! incompatibly. Adding a group, a method, or a field is a minor bump.
-
 use crate::{
     awake, capture, compositor, hardware, localsend, night, nix, power, tailscale, wallpaper,
 };
@@ -28,22 +8,14 @@ pub const VERSION: &str = "1.0";
 pub const VERSION_MAJOR: u32 = 1;
 pub const VERSION_MINOR: u32 = 0;
 
-/// Why a call failed, in a form a caller can branch on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    /// No such group in this contract.
     UnknownGroup,
-    /// The group exists but has no such method.
     UnknownMethod,
-    /// The group is part of the contract but not usable here (not implemented, or its
-    /// dependency is missing).
     Unavailable,
-    /// Parameters were missing or the wrong type.
     InvalidParams,
-    /// The underlying tool or compositor failed.
     BackendError,
-    /// The caller asked for a contract major version this build does not speak.
     VersionMismatch,
 }
 
@@ -51,7 +23,6 @@ pub enum ErrorCode {
 pub struct ApiError {
     pub code: ErrorCode,
     pub message: String,
-    /// Extra context, e.g. the methods that do exist when one does not.
     pub detail: Option<Value>,
 }
 
@@ -84,21 +55,15 @@ impl std::fmt::Display for ApiError {
     }
 }
 
-/// Wrap a backend failure, keeping its whole cause chain.
-///
-/// anyhow's `Display` shows only the outermost context, so a failure three layers down arrives as
-/// "asking X to accept the transfer" with no hint of why. The alternate form keeps the chain.
+/// anyhow's Display shows only the outermost context; the alternate form keeps the whole chain.
 fn backend_error(err: anyhow::Error) -> ApiError {
     ApiError::new(ErrorCode::BackendError, format!("{err:#}"))
 }
 
-/// Whether a group can be called on this machine, and why not when it cannot.
 #[derive(Debug, Clone)]
 pub enum Availability {
     Available,
-    /// In the contract, but nothing implements it in this build yet.
     Planned,
-    /// Implemented, but a dependency is missing at runtime.
     Unavailable(String),
 }
 
@@ -128,7 +93,6 @@ struct Method {
     name: &'static str,
     summary: &'static str,
     params: &'static [(&'static str, &'static str)],
-    /// A streaming method answers with many payloads over a held-open connection instead of one.
     streaming: bool,
 }
 
@@ -469,8 +433,6 @@ const GROUPS: &[Group] = &[
         summary: "Screenshots, OCR, colour picking, and recording",
         methods: CAPTURE,
     },
-    // Declared so the contract shape is stable and callers can feature-detect, but nothing here
-    // is implemented yet. Each lands with its own build-out step rather than as a stub.
     Group {
         name: "localsend",
         summary: "LocalSend device discovery and transfers",
@@ -498,13 +460,8 @@ const GROUPS: &[Group] = &[
     },
 ];
 
-/// Methods that answer even when their group is not available here.
-///
-/// A diagnostic is worth calling precisely when the thing it diagnoses is missing: `capture.status`
-/// is how a caller finds out that grim is not installed, so refusing it because grim is not
-/// installed would leave nobody able to ask. `capture.recording` is the same kind of question: the
-/// shell polls it to draw its indicator, and "is anything recording" has an answer on a machine
-/// with no grim.
+/// Diagnostics answer even when their group is unavailable: `capture.status` is how a caller learns
+/// grim is missing.
 const ALWAYS_ANSWERS: &[&str] = &[
     "capture.status",
     "capture.recording",
@@ -515,8 +472,8 @@ const ALWAYS_ANSWERS: &[&str] = &[
     "wallpaper.status",
 ];
 
-/// A group's availability is decided at call time, not at startup: a compositor can be restarted
-/// and Tailscale can be installed without EpochOxide being restarted.
+/// Decided per call: a compositor can restart, or Tailscale be installed, without restarting the
+/// daemon.
 fn availability(group: &str) -> Availability {
     match group {
         "compositor" => match compositor::active() {
@@ -546,8 +503,6 @@ fn availability(group: &str) -> Availability {
             Ok(()) => Availability::Available,
             Err(reason) => Availability::Unavailable(reason),
         },
-        // Discovery needs the multicast port, which is the one thing that can stop this working
-        // on an otherwise fine machine.
         "localsend" => match localsend::available() {
             Ok(()) => Availability::Available,
             Err(err) => Availability::Unavailable(err.to_string()),
@@ -564,7 +519,6 @@ fn group_names() -> Vec<&'static str> {
     GROUPS.iter().map(|group| group.name).collect()
 }
 
-/// The full contract: version, groups, methods, and what is callable right now.
 pub fn describe() -> Value {
     let groups: Vec<Value> = GROUPS
         .iter()
@@ -595,8 +549,6 @@ pub fn describe() -> Value {
     })
 }
 
-/// Whether `method` streams. The server holds the connection open for these instead of writing
-/// one response and moving on.
 pub fn is_streaming(method: &str) -> bool {
     let Some((group_name, call)) = method.split_once('.') else {
         return false;
@@ -605,8 +557,6 @@ pub fn is_streaming(method: &str) -> bool {
         .is_some_and(|found| found.methods.iter().any(|m| m.name == call && m.streaming))
 }
 
-/// Run a streaming method, handing each payload to `emit`. Returns when `emit` fails, which is
-/// how a disconnected client ends the stream.
 pub fn stream(
     method: &str,
     _params: &Value,
@@ -630,7 +580,6 @@ pub fn stream(
     }
 }
 
-/// The running receiver, or a typed error explaining that transfers are not being accepted.
 fn receiving() -> Result<std::sync::Arc<localsend::server::Receiver>, ApiError> {
     localsend::receiver().ok_or_else(|| {
         ApiError::new(
@@ -640,10 +589,6 @@ fn receiving() -> Result<std::sync::Arc<localsend::server::Receiver>, ApiError> 
     })
 }
 
-/// An optional directory parameter, `~` expanded and required to exist.
-///
-/// A path that is not there is refused rather than created: a typo would otherwise silently make
-/// a directory and drop files somewhere nobody looks.
 fn optional_directory(params: &Value, key: &str) -> Result<Option<std::path::PathBuf>, ApiError> {
     let Some(raw) = params.get(key).and_then(Value::as_str) else {
         return Ok(None);
@@ -661,11 +606,6 @@ fn optional_directory(params: &Value, key: &str) -> Result<Option<std::path::Pat
     Ok(Some(expanded))
 }
 
-/// A path parameter that does not have to exist yet.
-///
-/// Unlike [`optional_directory`], a missing directory here is created rather than refused: the
-/// caller is naming where its own screenshot should go, and `~/Pictures/Screenshots` not existing
-/// on a fresh machine is the normal case rather than a typo.
 fn optional_path(params: &Value, key: &str) -> Option<std::path::PathBuf> {
     params
         .get(key)
@@ -678,7 +618,6 @@ fn param_bool(params: &Value, key: &str) -> Option<bool> {
     params.get(key).and_then(Value::as_bool)
 }
 
-/// A parameter that may arrive as a number or as the string a shell handed straight through.
 fn param_number(params: &Value, key: &str) -> Result<Option<f64>, ApiError> {
     match params.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -730,18 +669,13 @@ fn param_strings(params: &Value, key: &str) -> Result<Vec<String>, ApiError> {
         .collect()
 }
 
-/// Read the parameters `capture.screenshot` and `capture.ocr` share.
-///
-/// The two differ only in what they do with the frame afterwards, so what to point the camera at
-/// is read once here rather than drifting apart in two places.
 fn capture_request(params: &Value) -> Result<capture::Request, ApiError> {
     let mode = match params.get("mode").and_then(Value::as_str) {
         Some(mode) if !mode.is_empty() => capture::Mode::parse(mode)
             .map_err(|err| ApiError::new(ErrorCode::InvalidParams, err.to_string()))?,
         _ => capture::Mode::default(),
     };
-    // A negative delay is a sign the caller meant something else; it cannot be honoured either
-    // way, and Duration::from_secs_f64 panics on one.
+    // Duration::from_secs_f64 panics on a negative value.
     let delay = param_number(params, "delay")?.unwrap_or(0.0);
     if delay < 0.0 || !delay.is_finite() {
         return Err(ApiError::new(
@@ -776,10 +710,6 @@ fn value<T: Serialize>(data: T) -> Result<Value, ApiError> {
         .map_err(|err| ApiError::new(ErrorCode::BackendError, err.to_string()))
 }
 
-/// Call `group.method`. `params` may be `Value::Null` for methods that take none.
-///
-/// `version` is the contract major the caller was built against; a mismatch is refused rather
-/// than served with a shape the caller may not understand.
 pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Value, ApiError> {
     if let Some(requested) = version {
         if requested != VERSION_MAJOR {
@@ -907,8 +837,6 @@ pub fn dispatch(method: &str, params: &Value, version: Option<u32>) -> Result<Va
             value(wallpaper::set(path).map_err(backend_error)?)
         }
         ("wallpaper", "next") => {
-            // Signed, so one method covers both directions and a caller asking for -1 is not a
-            // second endpoint.
             let step = params.get("step").and_then(Value::as_i64).unwrap_or(1);
             value(wallpaper::step(step).map_err(backend_error)?)
         }
@@ -1058,8 +986,6 @@ mod tests {
 
     #[test]
     fn a_diagnostic_answers_even_when_its_group_cannot() {
-        // capture.status reports which capture tools are missing, so gating it behind those tools
-        // being present would leave nobody able to ask.
         for method in ALWAYS_ANSWERS {
             let (group_name, call) = method.split_once('.').expect("group.method");
             let found = group(group_name).expect("a real group");
@@ -1073,7 +999,6 @@ mod tests {
 
     #[test]
     fn an_unknown_screenshot_mode_is_a_parameter_error() {
-        // Availability depends on grim being installed, so only assert where the group is live.
         if !availability("capture").callable() {
             return;
         }
@@ -1098,8 +1023,6 @@ mod tests {
 
     #[test]
     fn missing_params_are_named() {
-        // compositor availability depends on the machine, so assert only on the params path when
-        // the group is callable here.
         if !availability("compositor").callable() {
             return;
         }

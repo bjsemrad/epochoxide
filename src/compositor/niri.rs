@@ -1,5 +1,3 @@
-//! niri, over `niri msg --json`.
-
 use super::ipc::{niri_output, niri_shell, niri_watch, run};
 use super::{Compositor, Monitor, Window, Workspace};
 use anyhow::Result;
@@ -19,7 +17,6 @@ impl Compositor for Niri {
 
     fn windows(&self) -> Option<Vec<Window>> {
         let windows = json(&["msg", "--json", "windows"])?;
-        // niri identifies a window's workspace by id; the shell wants its name.
         let names = workspace_names();
         Some(
             windows
@@ -59,7 +56,6 @@ impl Compositor for Niri {
 
     fn monitors(&self) -> Option<Vec<Monitor>> {
         let outputs = json(&["msg", "--json", "outputs"])?;
-        // niri keys outputs by connector name rather than returning a list.
         let entries: Vec<(String, &Value)> = match &outputs {
             Value::Object(map) => map
                 .iter()
@@ -119,7 +115,6 @@ impl Compositor for Niri {
     }
 }
 
-/// One window of `niri msg --json windows`, with its workspace named through `names`.
 fn window_from(window: &Value, names: &HashMap<i64, String>) -> Window {
     let id = window.get("id").and_then(Value::as_i64).unwrap_or(0);
     Window {
@@ -146,8 +141,6 @@ fn window_from(window: &Value, names: &HashMap<i64, String>) -> Window {
     }
 }
 
-/// niri lays windows out in scrolling columns, so a window's position in that layout is its
-/// order on screen -- the equivalent of an x/y for ordering purposes.
 fn layout_pos(window: &Value, index: usize) -> i64 {
     window
         .get("layout")
@@ -158,7 +151,6 @@ fn layout_pos(window: &Value, index: usize) -> i64 {
         .unwrap_or(0)
 }
 
-/// The tile's width in logical pixels, `layout.tile_size[0]`, rounded; 0 when niri does not say.
 fn tile_width(window: &Value) -> i64 {
     window
         .get("layout")
@@ -178,8 +170,7 @@ fn string(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// niri workspaces are often unnamed; fall back to the display index, then the raw id, so a
-/// workspace always has something a person can read.
+/// niri workspaces are often unnamed; fall back to the index, then the id.
 fn workspace_name(workspace: &Value, id: i64) -> String {
     string(workspace, "name")
         .filter(|name| !name.is_empty())
@@ -223,7 +214,6 @@ mod tests {
 
     #[test]
     fn an_unnamed_workspace_falls_back_to_its_index() {
-        // niri reports name: null for the workspaces most people actually use.
         let workspace = json!({ "id": 7, "idx": 2, "name": Value::Null });
         assert_eq!(workspace_name(&workspace, 7), "2");
     }
@@ -234,7 +224,6 @@ mod tests {
         assert_eq!(workspace_name(&workspace, 7), "2");
     }
 
-    // As `niri msg --json windows` reports a tiled window, trimmed to what is read.
     fn captured_window() -> Value {
         json!({
             "id": 42,

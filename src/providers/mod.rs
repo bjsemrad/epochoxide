@@ -82,9 +82,6 @@ impl Registry {
         if enabled(&config, "calc") {
             providers.push(Box::new(calc::CalcProvider::new(config.clone())));
         }
-        // Menus are not one provider: each configured menu registers as its own, so it can be
-        // given a query prefix and jumped straight into. A menu whose name collides with a
-        // provider already registered is skipped rather than shadowing it.
         if enabled(&config, "menus") {
             for menu in menus::providers(&config)? {
                 if !enabled(&config, menu.name()) {
@@ -111,11 +108,8 @@ impl Registry {
         })
     }
 
-    /// Swaps in a freshly-loaded config. Only settings Registry itself reads per-query take
-    /// effect this way (provider_weights, query_prefixes, icon_theme/icon_cache_dir,
-    /// thumbnail_cache_enabled) — each provider captured its own config snapshot at construction
-    /// time (file_roots, runner_commands, provider_enabled, ...) and won't see the change without
-    /// a full restart.
+    /// Only settings Registry reads per query take effect; providers snapshot their config at
+    /// construction and need a restart.
     pub fn reload_config(&self, config: Config) {
         let icons = icons::IconResolver::new(&config);
         *self.icons.lock().unwrap() = Arc::new(icons);
@@ -229,9 +223,6 @@ impl Registry {
         self.providers[idx].lock().unwrap().menu(name)
     }
 
-    /// Spawns one thread per selected provider and streams `(provider, items)` back over the
-    /// returned channel as each provider finishes, in completion order rather than registration
-    /// order — a slow provider no longer holds up faster ones.
     pub fn query_batches(
         &self,
         providers: &[String],

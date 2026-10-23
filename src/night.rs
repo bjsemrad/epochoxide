@@ -1,16 +1,3 @@
-//! Night mode: warm the screen and leave it warm.
-//!
-//! Held as a process, the way stay-awake and recording are: every tool that does this holds a
-//! `wlr-gamma-control` object for as long as it runs and hands the screen back when it exits.
-//! That makes turning it off a kill rather than another command, and means nothing can leave a
-//! session tinted after the daemon goes away.
-//!
-//! Which tool depends on the compositor. `gammastep` and `wlsunset` speak `wlr-gamma-control`,
-//! which niri, sway and Hyprland all implement. `hyprsunset` does not: from 0.2 on it speaks only
-//! `hyprland-ctm-control`, which is Hyprland's own, so on niri it starts, finds nothing to talk to,
-//! and leaves the screen exactly as it was. It is the first choice under Hyprland -- it is
-//! Hyprland's own tool -- and never chosen anywhere else.
-
 use crate::config::Config;
 use crate::notify;
 use anyhow::{anyhow, bail, Context, Result};
@@ -19,28 +6,20 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// Tools that can hold a colour temperature, in the order they are tried, with how each is asked
-/// for one. `{k}` is the temperature in kelvin.
 const TOOLS: &[(&str, &[&str])] = &[
     ("hyprsunset", &["-t", "{k}"]),
     ("gammastep", &["-O", "{k}"]),
-    // wlsunset has no one-shot mode: giving it the same day and night temperature is how it is
-    // held at one value.
+    // wlsunset has no one-shot mode: equal day and night temperatures hold it at one value.
     ("wlsunset", &["-t", "{k}", "-T", "{k}"]),
 ];
 
-/// What a screen is set to when night mode is off. Nothing sets this; it is what the tools mean by
-/// neutral, and is reported so a caller can show the difference.
 const DAYLIGHT: u32 = 6500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct NightLight {
     pub enabled: bool,
-    /// Kelvin. Lower is warmer; this is the configured value whether or not it is being applied.
     pub temperature: u32,
-    /// What neutral looks like, for a caller that wants to show both.
     pub daylight: u32,
-    /// The tool holding the screen, empty when nothing is.
     pub tool: String,
     pub available: bool,
     pub unavailable_reason: Option<String>,
@@ -70,15 +49,12 @@ fn configured_temperature() -> u32 {
         .unwrap_or(&Config::default().night_light_temperature)
 }
 
-/// Whether a tool can warm the screen under this compositor. hyprsunset only under Hyprland: see
-/// the module comment.
+/// hyprsunset 0.2+ speaks only hyprland-ctm-control: on other compositors it starts and does
+/// nothing.
 fn usable_here(name: &str, on_hyprland: bool) -> bool {
     name != "hyprsunset" || on_hyprland
 }
 
-/// The first tool installed that works under the compositor actually running, and the arguments
-/// it wants. Asked of the running compositor rather than the environment, which a daemon started
-/// in one session can carry into the next.
 fn tool() -> Option<(&'static str, &'static [&'static str])> {
     let on_hyprland = crate::compositor::active().is_some_and(|backend| backend.name() == "hypr");
     TOOLS
@@ -109,10 +85,6 @@ fn held() -> Result<std::sync::MutexGuard<'static, Option<Held>>> {
         .map_err(|_| anyhow!("the night light lock is poisoned"))
 }
 
-/// Whether the screen is being warmed, and by what.
-///
-/// A tool that has died on its own is noticed here and cleared: the screen went back to normal when
-/// it exited, so continuing to report night mode as on would be a lie a bar indicator repeats.
 pub fn status() -> NightLight {
     let availability = available();
     let mut slot = match held() {
@@ -147,10 +119,6 @@ pub fn status() -> NightLight {
     }
 }
 
-/// Turn night mode on or off. `enabled` of `None` toggles.
-///
-/// Asking for a different temperature while it is already on restarts the tool, because none of
-/// them can be re-aimed once running.
 pub fn set(
     enabled: Option<bool>,
     temperature: Option<u32>,
@@ -167,7 +135,6 @@ pub fn set(
         return Ok(current);
     }
 
-    // Off first either way: turning it off is the whole job, and a temperature change is a restart.
     if let Some(mut active) = held()?.take() {
         let _ = active.child.kill();
         let _ = active.child.wait();
@@ -211,10 +178,6 @@ pub fn set(
     Ok(state)
 }
 
-/// Kelvin a screen can actually be set to.
-///
-/// The range is what the tools accept; a number outside it is a typo -- 400 instead of 4000 -- and
-/// refusing it is better than a screen that goes an alarming colour with no explanation.
 fn validate(temperature: u32) -> Result<u32> {
     if !(1000..=20000).contains(&temperature) {
         bail!("{temperature}K is not a screen temperature (1000-20000)");
@@ -235,7 +198,6 @@ mod tests {
 
     #[test]
     fn a_temperature_outside_what_a_screen_does_is_refused() {
-        // 400 is 4000 with a missing zero, and it is worth catching rather than rendering.
         assert!(validate(400).is_err());
         assert!(validate(0).is_err());
         assert!(validate(50000).is_err());
@@ -265,10 +227,6 @@ mod tests {
         assert_eq!(idle.seconds, 0);
         assert!(idle.tool.is_empty());
     }
-
-    // Turning it on is not a unit test for the same reason stay-awake's is not: it would tint the
-    // screen of whatever machine ran the suite, and a failure would leave it that way. That path is
-    // exercised through `epochctl toggle night-light`.
 
     #[test]
     fn hyprsunset_is_only_used_under_hyprland() {

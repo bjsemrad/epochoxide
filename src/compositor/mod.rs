@@ -1,12 +1,3 @@
-//! Normalized compositor state.
-//!
-//! Each supported compositor is an implementation of [`Compositor`] in its own module; this one
-//! owns the shapes they all map onto, decides which implementation is answering, and exposes the
-//! result. Nothing outside this module sees a `hyprctl` payload or a niri window id.
-//!
-//! Adding a compositor means adding a module with an `impl Compositor` and one line in
-//! [`backends`] — no other file changes.
-
 mod hyprland;
 pub mod ipc;
 mod mango;
@@ -17,39 +8,23 @@ mod wmctrl;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-/// A window, as every supported compositor is made to describe it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Window {
-    /// Backend-qualified handle, e.g. `hypr:0x5a6557dd9b40`. Pass it back to [`focus_window`].
     pub id: String,
     pub app_id: String,
     pub title: String,
-    /// Workspace name, empty when the compositor does not report one.
     pub workspace: String,
-    /// Monitor name, empty when the compositor does not report one.
     pub monitor: String,
     pub focused: bool,
     pub floating: bool,
-    /// Position on its workspace. Used to order windows the way they are laid out on screen; a
-    /// backend that does not report geometry leaves both at zero.
     pub x: i64,
     pub y: i64,
-    /// The window's tile width in logical pixels, where the compositor reports one (niri's
-    /// `layout.tile_size`); 0 means unknown. The shell sizes a scrolling column's cell by it.
     #[serde(default)]
     pub width: i64,
 }
 
-/// Where a window sits on screen, in output-layout pixels.
-///
-/// Kept apart from [`Window`] because not every compositor reports it, and because the two mean
-/// different things: `Window::x` orders windows for the bar, while this names a rectangle a
-/// capture tool can grab. niri lays windows out in scrolling columns and reports a position in
-/// that layout rather than on screen, so it answers `None` here instead of handing a caller
-/// coordinates that do not describe a rectangle on a display.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WindowRegion {
-    /// The same backend-qualified handle [`Window::id`] carries.
     pub id: String,
     pub app_id: String,
     pub title: String,
@@ -62,7 +37,6 @@ pub struct WindowRegion {
 }
 
 impl WindowRegion {
-    /// The geometry as slurp and grim spell it: `x,y WxH`.
     pub fn geometry(&self) -> String {
         format!("{},{} {}x{}", self.x, self.y, self.width, self.height)
     }
@@ -88,17 +62,11 @@ pub struct Monitor {
     pub focused: bool,
 }
 
-/// What one compositor can answer.
-///
-/// Every method returning `Option` uses `None` for "this compositor is not here or did not
-/// answer", which is what backend selection keys on — not for "there are none", which is an empty
-/// vector. Workspaces and monitors default to unsupported so a minimal backend (wmctrl) only has
-/// to implement what it actually has.
+/// `None` means this compositor is absent or did not answer (backend selection keys on it), not
+/// "there are none".
 pub trait Compositor: Send + Sync {
-    /// Short name, and the prefix of every id this backend hands out.
     fn name(&self) -> &'static str;
 
-    /// Cheap liveness probe, used to pick the backend that is actually running.
     fn responds(&self) -> bool;
 
     fn windows(&self) -> Option<Vec<Window>>;
@@ -111,17 +79,10 @@ pub trait Compositor: Send + Sync {
         None
     }
 
-    /// Where each window a viewer can currently see sits on screen.
-    ///
-    /// `None` means this backend cannot say -- either it reports no screen-space geometry, or it
-    /// is not running. Callers fall back to asking the user to draw a region rather than guessing.
-    /// Windows on a workspace nobody is looking at are left out: their coordinates name a
-    /// rectangle that is on screen, but showing something else entirely.
     fn window_regions(&self) -> Option<Vec<WindowRegion>> {
         None
     }
 
-    /// `handle` is the part of [`Window::id`] after the backend prefix.
     fn focus_window(&self, handle: &str) -> Result<()>;
 
     fn close_window(&self, handle: &str) -> Result<()>;
@@ -130,12 +91,6 @@ pub trait Compositor: Send + Sync {
         anyhow::bail!("{} cannot switch workspaces", self.name())
     }
 
-    /// Block, calling `on_event` whenever compositor state may have changed.
-    ///
-    /// Backends with an event socket implement this so a change reaches the shell immediately.
-    /// The default polls, which is what a backend with no event source (wmctrl) is left with.
-    /// Implementations pass on whatever `on_event` returns: an error means the consumer has gone
-    /// away, and the watch should stop rather than spin.
     fn watch(&self, on_event: &mut dyn FnMut() -> Result<()>) -> Result<()> {
         loop {
             std::thread::sleep(POLL_INTERVAL);
@@ -144,13 +99,8 @@ pub trait Compositor: Send + Sync {
     }
 }
 
-/// How often a backend with no event source re-checks. Only wmctrl and sway use this.
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Everything the shell needs to render compositor state, in one payload.
-///
-/// State is pushed as a whole snapshot rather than as deltas: a compositor event says something
-/// changed but not reliably what, and the whole payload is a few hundred bytes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct State {
     pub backend: String,
@@ -160,7 +110,6 @@ pub struct State {
     pub active_window: Option<Window>,
 }
 
-/// Read the whole of the current state from one backend.
 pub fn state_of(backend: &dyn Compositor) -> State {
     let mut windows = backend.windows().unwrap_or_default();
     sort_windows(&mut windows);
@@ -175,11 +124,6 @@ pub fn state_of(backend: &dyn Compositor) -> State {
     }
 }
 
-/// Watch the running compositor, calling `emit` with a fresh snapshot whenever one differs from
-/// the last. Blocks until `emit` fails, which is how a disconnected client stops the watch.
-///
-/// Events are deliberately not forwarded: a raw `workspace>>3` line is exactly the sort of
-/// backend detail this module exists to keep out of the shell. An event only triggers a re-read.
 pub fn watch(mut emit: impl FnMut(&State) -> Result<()>) -> Result<()> {
     let backend =
         active().ok_or_else(|| anyhow::anyhow!("no supported compositor is responding"))?;
@@ -187,8 +131,6 @@ pub fn watch(mut emit: impl FnMut(&State) -> Result<()>) -> Result<()> {
     emit(&last)?;
     backend.watch(&mut || {
         let current = state_of(backend.as_ref());
-        // Compositors emit several events for one user action, and some (cursor moves, focus
-        // churn) change nothing the shell renders. Only differences are worth a wake-up.
         if current != last {
             last = current;
             emit(&last)?;
@@ -197,11 +139,8 @@ pub fn watch(mut emit: impl FnMut(&State) -> Result<()>) -> Result<()> {
     })
 }
 
-/// Every backend, in the order they should be tried.
-///
-/// Environment hints put the advertised compositor first; the rest still follow, because under a
-/// systemd user service none of those variables are necessarily set and the only reliable test is
-/// whether a backend answers.
+/// Environment hints go first, but every backend is tried: under a systemd user service those
+/// variables may be unset.
 fn backends() -> Vec<Box<dyn Compositor>> {
     let hypr = || Box::new(hyprland::Hyprland) as Box<dyn Compositor>;
     let niri = || Box::new(niri::Niri) as Box<dyn Compositor>;
@@ -217,7 +156,6 @@ fn backends() -> Vec<Box<dyn Compositor>> {
     }
 }
 
-/// The compositor the environment advertises, if it advertises one.
 pub fn preferred_from_env() -> Option<&'static str> {
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
         return Some("hypr");
@@ -245,13 +183,10 @@ pub fn preferred_from_env() -> Option<&'static str> {
     None
 }
 
-/// The backend that is actually answering, which is not always the one the environment
-/// advertises.
 pub fn active() -> Option<Box<dyn Compositor>> {
     backends().into_iter().find(|backend| backend.responds())
 }
 
-/// Ask each backend in turn and take the first that answers.
 fn first<T>(query: impl Fn(&dyn Compositor) -> Option<T>) -> Option<T> {
     backends()
         .iter()
@@ -264,9 +199,6 @@ pub fn windows() -> Vec<Window> {
     windows
 }
 
-/// Left to right, then top to bottom, which is the order they appear on screen and so the order
-/// the bar should draw them in. Compositors return windows in their own internal order -- most
-/// recently focused, or creation order -- which is not what a viewer sees.
 pub fn sort_windows(windows: &mut [Window]) {
     windows.sort_by(|a, b| {
         workspace_order(&a.workspace)
@@ -277,8 +209,6 @@ pub fn sort_windows(windows: &mut [Window]) {
     });
 }
 
-/// Order a workspace by its displayed name: numerically when it is a number, which is the usual
-/// case on Hyprland, niri and mango, and alphabetically after those when it is not.
 fn workspace_order(name: &str) -> (u8, i64, String) {
     match name.parse::<i64>() {
         Ok(number) => (0, number, String::new()),
@@ -300,13 +230,10 @@ pub fn monitors() -> Vec<Monitor> {
     first(|backend| backend.monitors()).unwrap_or_default()
 }
 
-/// Visible windows and their on-screen rectangles, or `None` when the running compositor does not
-/// report them. Used by capture to grab a window without the user drawing a box around it.
 pub fn window_regions() -> Option<Vec<WindowRegion>> {
     first(|backend| backend.window_regions())
 }
 
-/// The monitor the compositor says is focused, by name.
 pub fn focused_monitor() -> Option<String> {
     monitors()
         .into_iter()
@@ -315,7 +242,6 @@ pub fn focused_monitor() -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-/// Look up the backend named by a `backend:handle` id.
 fn resolve(id: &str) -> Result<(Box<dyn Compositor>, String)> {
     let (name, handle) = id
         .split_once(':')
@@ -337,8 +263,6 @@ pub fn close_window(id: &str) -> Result<()> {
     backend.close_window(&handle)
 }
 
-/// Switch workspaces by qualified id, or by a bare name/number against the running compositor so
-/// a keybinding does not have to know which backend it is on.
 pub fn focus_workspace(id: &str) -> Result<()> {
     match resolve(id) {
         Ok((backend, handle)) => backend.focus_workspace(&handle),
@@ -446,8 +370,6 @@ mod tests {
 
     #[test]
     fn windows_are_ordered_left_to_right_then_top_to_bottom() {
-        // Compositors hand back windows in focus or creation order; the bar wants the order they
-        // sit on screen.
         let mut windows = vec![
             window("1", 900, 0, "c"),
             window("1", 100, 500, "b"),
@@ -467,7 +389,7 @@ mod tests {
         ];
         sort_windows(&mut windows);
         let ids: Vec<&str> = windows.iter().map(|w| w.id.as_str()).collect();
-        // "10" must not sort between "1" and "2", which a plain string sort would do.
+        // "10" must not sort between "1" and "2".
         assert_eq!(ids, ["one", "two", "ten"]);
     }
 
@@ -480,8 +402,6 @@ mod tests {
 
     #[test]
     fn ordering_is_stable_for_windows_in_the_same_place() {
-        // Two windows can report the same position (a stack, or a backend with no geometry at
-        // all), and the strip should not reshuffle between snapshots.
         let mut windows = vec![window("1", 0, 0, "b"), window("1", 0, 0, "a")];
         sort_windows(&mut windows);
         let ids: Vec<&str> = windows.iter().map(|w| w.id.as_str()).collect();

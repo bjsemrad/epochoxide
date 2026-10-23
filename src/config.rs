@@ -6,20 +6,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// How the files provider gets its search results.
-///
-/// The in-memory index answers in microseconds where fd takes ~200ms over a large home directory,
-/// but it holds every indexed path in RAM — roughly 1.6KB per entry, so a 700k-entry home costs
-/// over a gigabyte against fd's near-zero. Which of those matters is the user's call, not ours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileIndex {
-    /// Search with fd, and build the index only as a fallback when fd is not installed.
     #[default]
     Auto,
-    /// Always build the index, and use it in preference to fd. Fast, memory-hungry.
     Always,
-    /// Never build the index. The files provider goes quiet if fd is not installed.
     Never,
 }
 
@@ -36,73 +28,29 @@ pub struct Config {
     pub clipboard_text_editor: String,
     pub clipboard_image_editor: String,
     pub clipboard_ocr: bool,
-    /// Accept incoming LocalSend transfers. The receiver binds a port and answers discovery, so
-    /// it is opt-in-able rather than always on.
     pub localsend_receive: bool,
-    /// Where accepted transfers are written.
     pub localsend_download_dir: String,
-    /// Name shown to other devices. Empty means use the host name.
     pub localsend_alias: String,
-    /// Where `capture.screenshot` saves. Created on the first shot rather than at startup.
     pub screenshot_dir: String,
-    /// Name for a saved screenshot, expanded by `date`, so `%Y-%m-%d` means what it says. An
-    /// extension picks the format: `.png` (default), `.jpg`, or `.ppm`.
     pub screenshot_filename: String,
-    /// Put each screenshot on the clipboard as well as saving it.
     pub screenshot_copy: bool,
-    /// Keep each screenshot as a file. With this off, shots are copied and left in the cache.
     pub screenshot_save: bool,
-    /// Announce each screenshot to the session's notification server, which is the shell.
     pub screenshot_notify: bool,
-    /// Open each screenshot in satty to annotate before it is copied or saved, rather than copying
-    /// or saving it straight away.
     pub screenshot_annotate: bool,
-    /// Tesseract language `capture.ocr` reads with. Several can be joined with `+`, e.g.
-    /// `eng+deu`, as long as the data files for them are installed.
     pub ocr_language: String,
-    /// Where `capture.record` writes. Created when the first recording starts.
     pub recording_dir: String,
-    /// Directories the wallpaper switcher looks in, searched two levels deep for images.
     pub wallpaper_dirs: Vec<String>,
-    /// What draws the wallpaper: "shell" (EpochShell, on a background layer), "hyprpaper", or
-    /// "auto" -- hyprpaper when it is running, the shell otherwise.
     pub wallpaper_backend: String,
-    /// How the image is fitted to the output. The shell draws "cover", "contain", "tile" and
-    /// "stretch" as named. Under hyprpaper this is sent over hyprctl, which understands
-    /// "contain", "tile", "stretch"/"fit", and quietly treats everything else as "cover" -- so a
-    /// mode it does not know is not an error here, it is a wallpaper that ignored the setting.
-    ///
-    /// Note that hyprpaper.conf speaks a different dialect: its `fit_mode = fill` is this
-    /// "stretch", and there is no `fill` over IPC at all. Matching a hand-written hyprpaper.conf
-    /// means translating, not copying.
     pub wallpaper_fit_mode: String,
-    /// Name for a recording, expanded by `date`. The extension picks the container wf-recorder
-    /// writes, so `.mp4` and `.mkv` both work.
     pub recording_filename: String,
-    /// Announce a finished recording to the session's notification server.
     pub recording_notify: bool,
-    /// The flake `capture`-adjacent Nix awareness watches, e.g. `~/nixconfig`. Empty turns the
-    /// whole feature off; nothing is ever written to it.
     pub nix_flake: String,
-    /// Minutes between automatic update checks. Zero turns the timer off, leaving `nix.check`.
     pub nix_check_interval_minutes: u64,
-    /// What `nix.update` runs in a terminal, from the flake's directory.
     pub nix_update_command: String,
-    /// What `nix.rebuild` runs. Empty by default: guessing a rebuild command means running the
-    /// wrong one on someone's machine. `%HOST%` is replaced with the host being rebuilt.
     pub nix_rebuild_command: String,
-    /// Colour temperature night mode warms the screen to, in kelvin. Lower is warmer; 6500 is
-    /// neutral daylight.
     pub night_light_temperature: u32,
-    /// Hosts to offer a rebuild for, each with the command that rebuilds it. Empty reads the
-    /// names from the flake's `nixosConfigurations` and falls back to `nix_rebuild_command`.
     pub nix_hosts: Vec<NixHost>,
-    /// Notify when an input gains an update it did not have at the previous check.
     pub nix_notify: bool,
-    /// Frames per second to record at. A constant rate is what keeps the file playable: left to
-    /// pick its own timing, wf-recorder writes a stream declaring 90000fps, and x264 derives an
-    /// H.264 level from that which players refuse to decode -- the video opens, and shows black.
-    /// Zero hands the timing back to wf-recorder.
     pub recording_framerate: u32,
     pub clipboard_capture_interval_ms: u64,
     pub runner_scan_path: bool,
@@ -117,15 +65,9 @@ pub struct Config {
     pub file_index: FileIndex,
 }
 
-/// One host in the flake, and how it is rebuilt.
-///
-/// The command is per host rather than one template with the host substituted in, because a
-/// rebuild is usually an alias or a script that already knows its target -- `rebuild-thor`,
-/// `deploy odin` -- and rewriting those from a template gets the wrong machine.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NixHost {
     pub name: String,
-    /// What rebuilds this host. Empty falls back to `nix_rebuild_command`, with `%HOST%` replaced.
     #[serde(default)]
     pub rebuild: String,
 }
@@ -220,31 +162,15 @@ impl Default for Config {
             screenshot_annotate: false,
             ocr_language: "eng".into(),
             recording_dir: home.join("Videos/Recordings").display().to_string(),
-            // ~/.config/hypr first, because that is where a hyprpaper setup actually keeps them --
-            // a home-manager install fills it with symlinks into the store, which is why the scan
-            // follows them. The rest are the conventional spots, listed so dropping images into any
-            // of them just works; a directory that does not exist is skipped without complaint.
-            //
-            // Deliberately NOT ~/Pictures itself. The scan goes two levels deep, so that would pull
-            // in ~/Pictures/Screenshots and bury the real wallpapers under every screenshot ever
-            // taken. ~/Pictures/Wallpapers is the version of that which is safe to assume.
             wallpaper_dirs: vec![
                 home.join(".config/hypr").display().to_string(),
                 home.join("Pictures/Wallpapers").display().to_string(),
                 home.join("Wallpapers").display().to_string(),
                 home.join(".local/share/wallpapers").display().to_string(),
             ],
-            // Cover, because it is the only thing hyprpaper 0.8.4 will actually do here that
-            // fills the output. Stretch is unreachable over IPC in that version: hyprctl parses
-            // "stretch"/"fit" into the STRETCH enum, hyprpaper re-serialises that enum to the
-            // string "fit" (src/ipc/IPC.cpp), and its own parser only reads "fill" for stretch
-            // (src/ui/UI.cpp), so the value falls through to cover. Measured, not guessed --
-            // "stretch", "fit" and "fill" all render pixel-identical to "cover", while "contain"
-            // and "tile" differ. If hyprpaper is ever patched or fixed upstream, "stretch" here
-            // is the one word that needs changing back.
-            //
-            // Worth knowing when testing this by hand: hyprpaper only re-fits when the target
-            // changes, so re-sending the same image with a different mode does nothing at all.
+            // hyprpaper 0.8.4 renders "stretch", "fit" and "fill" as cover over IPC (hyprctl and
+            // hyprpaper disagree on the enum's string), so cover is the only filling mode that
+            // works.
             wallpaper_fit_mode: "cover".into(),
             wallpaper_backend: "auto".into(),
             recording_filename: "recording-%Y%m%d-%H%M%S.mp4".into(),
@@ -515,8 +441,6 @@ fn default_provider_weights() -> HashMap<String, i32> {
     .collect()
 }
 
-/// Menus get no default prefix: each one registers under its own name, so a shortcut for it is a
-/// `"?" = "keybinds"` line the user adds here alongside the built-in providers.
 fn default_query_prefixes() -> HashMap<String, String> {
     [
         (">", "runner"),

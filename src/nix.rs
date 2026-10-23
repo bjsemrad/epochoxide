@@ -1,18 +1,3 @@
-//! Nix flake update awareness.
-//!
-//! Answers one question -- "can my system be updated?" -- without ever changing anything to find
-//! out. Three rules shape the whole module:
-//!
-//! 1. **Nothing is written to the user's flake.** Checking resolves every input to what it would
-//!    lock to today and writes that candidate lock to a temp file through
-//!    `nix flake update --output-lock-file`, leaving `flake.lock` exactly as it was. Comparing the
-//!    two locks is the whole check. A copy of the flake was the other option and is worse: it goes
-//!    stale, and a `path:` input inside it stops resolving.
-//! 2. **Updating is the user's action, never ours.** `update` and `rebuild` run commands the user
-//!    configured, in their terminal, only when asked. Neither has a default that changes a system.
-//! 3. **The answer is cached.** A check costs a network round trip per input, so the shell asks
-//!    for `status` -- which answers from memory -- and a timer does the checking.
-
 use crate::config::Config;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -22,24 +7,17 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// A host in the flake, and the command that rebuilds it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Host {
     pub name: String,
-    /// The command that rebuilds this host, already resolved from config. Empty means nothing is
-    /// configured for it, and the shell should not offer a rebuild that would do nothing.
     pub rebuild: String,
-    /// True when the host was named in config rather than read out of the flake.
     pub configured: bool,
 }
 
-/// One flake input, as it is pinned now and as it would be pinned after an update.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Input {
     pub name: String,
-    /// `github`, `git`, `tarball`, and so on, as the lock records it.
     pub kind: String,
-    /// Where the input comes from, in the form the flake asked for it.
     pub source: String,
     pub current_rev: String,
     pub current_date: i64,
@@ -48,32 +26,21 @@ pub struct Input {
     pub update_available: bool,
 }
 
-/// What the last check found, plus everything the shell needs to render a panel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Status {
-    /// The configured flake, empty when the feature is off.
     pub flake: String,
     pub configured: bool,
-    /// False when nix is missing, the path is not a flake, or nothing is configured.
     pub available: bool,
     pub reason: Option<String>,
-    /// When `flake.lock` was last written, which is when the system was last updated.
     pub locked_at: i64,
-    /// When the last check ran. Zero means it has not run yet.
     pub checked_at: i64,
-    /// True while a check is running, so a panel can say so rather than look stuck.
     pub checking: bool,
-    /// How many inputs have something newer.
     pub updates: usize,
     pub inputs: Vec<Input>,
-    /// What the last check failed with, if it failed.
     pub error: Option<String>,
     pub update_command: String,
     pub rebuild_command: String,
-    /// The hosts this flake defines, from the last check. Every host shares one `flake.lock`, so
-    /// updates are flake-wide; what differs per host is which rebuild command to run.
     pub hosts: Vec<Host>,
-    /// Minutes between automatic checks; zero when they are off.
     pub interval_minutes: u64,
 }
 
@@ -115,7 +82,6 @@ impl Settings {
 
 static SETTINGS: OnceLock<Settings> = OnceLock::new();
 
-/// The last completed check, and whether one is running now.
 static STATE: Mutex<Option<Checked>> = Mutex::new(None);
 static CHECKING: Mutex<bool> = Mutex::new(false);
 
@@ -135,7 +101,6 @@ fn settings() -> Settings {
     SETTINGS.get().cloned().unwrap_or_default()
 }
 
-/// Whether update checking can work here, and why not when it cannot.
 pub fn available() -> Result<(), String> {
     let settings = settings();
     if !settings.configured() {
@@ -153,7 +118,6 @@ pub fn available() -> Result<(), String> {
     Ok(())
 }
 
-/// The cached answer. Cheap: no network, no nix, no writes.
 pub fn status() -> Status {
     let settings = settings();
     let checked = STATE.lock().ok().and_then(|state| state.clone());
@@ -187,15 +151,10 @@ pub fn status() -> Status {
     }
 }
 
-/// Resolve every input to what it would lock to today and compare.
-///
-/// Slow -- a network round trip per input -- and safe to run at any time: the only thing written
-/// is a lock file in a temp directory, which is deleted before this returns.
 pub fn check() -> Result<Status> {
     if let Err(reason) = available() {
         bail!("{reason}");
     }
-    // Two checks at once would do the same work twice and race over the result.
     {
         let mut checking = CHECKING
             .lock()
@@ -214,8 +173,6 @@ pub fn check() -> Result<Status> {
         Ok(inputs) => (inputs, None),
         Err(err) => (Vec::new(), Some(format!("{err:#}"))),
     };
-    // Hosts come along with the check because they are answered from the same flake and change
-    // about as often; a failure to list them is not a failed check.
     let hosts = hosts().unwrap_or_default();
     let previous = STATE.lock().ok().and_then(|state| state.clone());
     if let Ok(mut state) = STATE.lock() {
@@ -235,8 +192,7 @@ fn run_check() -> Result<Vec<Input>> {
     let current = read_lock(&settings.flake.join("flake.lock"))
         .context("reading the flake's current lock")?;
 
-    // The candidate lock goes to a temp directory: `--output-lock-file` is what keeps the user's
-    // own flake.lock untouched while still resolving through nix rather than guessing.
+    // `--output-lock-file` to a temp dir keeps the user's flake.lock untouched.
     let scratch = std::env::temp_dir().join(format!("epochoxide-flake-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).with_context(|| format!("creating {}", scratch.display()))?;
     let candidate_path = scratch.join("candidate.lock");
@@ -264,11 +220,6 @@ fn run_check() -> Result<Vec<Input>> {
     Ok(compare(&current, &candidate))
 }
 
-/// A flake.lock, reduced to what the root flake actually asked for.
-///
-/// Only the root's own inputs are considered: they are what a user updates and what a version
-/// number means to them. A transitive input moving on its own is invisible to `nix flake update`
-/// at this level too.
 #[derive(Debug, Clone, PartialEq)]
 struct Lock {
     inputs: Vec<LockedInput>,
@@ -305,7 +256,7 @@ fn parse_lock(value: &Value) -> Lock {
     let mut inputs: Vec<LockedInput> = root
         .iter()
         .filter_map(|(name, target)| {
-            // An input written as ["a", "b"] is a `follows`, which has no revision of its own.
+            // An input written as ["a", "b"] is a `follows`, with no revision of its own.
             let id = target.as_str()?;
             let node = nodes.get(id)?;
             let locked = node.get("locked")?;
@@ -325,7 +276,6 @@ fn parse_lock(value: &Value) -> Lock {
     Lock { inputs }
 }
 
-/// A flake reference in the shape a person would have typed it.
 fn describe(original: &Value) -> String {
     let kind = string(original, "type");
     let reference = |base: String| {
@@ -373,8 +323,6 @@ fn string(value: &Value, key: &str) -> String {
         .to_string()
 }
 
-/// Pair each current input with its candidate. An input the update would drop, or one it would
-/// add, is not an update to anything and is left out.
 fn compare(current: &Lock, candidate: &Lock) -> Vec<Input> {
     current
         .inputs
@@ -386,8 +334,6 @@ fn compare(current: &Lock, candidate: &Lock) -> Vec<Input> {
                 .find(|other| other.name == input.name);
             let latest_rev = latest.map(|l| l.rev.clone()).unwrap_or_default();
             let latest_date = latest.map(|l| l.date).unwrap_or(0);
-            // Revisions are the truth; dates only order them. An input with no revision at all --
-            // a tarball, say -- is compared by date instead.
             let update_available = if !input.rev.is_empty() && !latest_rev.is_empty() {
                 input.rev != latest_rev
             } else {
@@ -407,11 +353,6 @@ fn compare(current: &Lock, candidate: &Lock) -> Vec<Input> {
         .collect()
 }
 
-/// Tell the user when something new turned up, and only then.
-///
-/// A check runs every hour; saying "23 updates available" every hour is how a notifier teaches
-/// people to ignore it. This fires when an input has something newer that it did not have at the
-/// last check.
 fn announce(previous: Option<&Checked>, inputs: &[Input]) {
     let settings = settings();
     if !settings.notify || !crate::notify::available() {
@@ -453,22 +394,10 @@ fn announce(previous: Option<&Checked>, inputs: &[Input]) {
     let _ = crate::notify::send(&summary, &body, "system-software-update", None, "epoch-nix");
 }
 
-/// The hosts this flake defines, and how each is rebuilt.
-///
-/// Configured hosts come first and are authoritative: a rebuild is usually an alias or a script
-/// that already knows its target, so the command is stored per host rather than derived from one
-/// template. Anything the flake defines that config did not name is listed too, falling back to
-/// `nix_rebuild_command` with `%HOST%` substituted -- and left without a command when there is no
-/// fallback either, so the shell can offer only what will actually run.
-///
-/// Worth being clear about what a host is here: every host in a flake shares one `flake.lock`, so
-/// "which hosts have updates" has the same answer for all of them. What differs is which rebuild
-/// to run, which is why hosts sit next to the rebuild action rather than next to the inputs.
 pub fn hosts() -> Result<Vec<Host>> {
     let settings = settings();
     let mut hosts = configured_hosts(&settings);
     if let Err(reason) = available() {
-        // Configured hosts are still worth answering with: they need no flake to be listed.
         if hosts.is_empty() {
             bail!("{reason}");
         }
@@ -504,7 +433,6 @@ fn configured_hosts(settings: &Settings) -> Vec<Host> {
         .collect()
 }
 
-/// `nix_rebuild_command` with `%HOST%` filled in, or nothing when none is configured.
 fn fallback_command(settings: &Settings, host: &str) -> String {
     if settings.rebuild_command.trim().is_empty() {
         return String::new();
@@ -512,7 +440,6 @@ fn fallback_command(settings: &Settings, host: &str) -> String {
     settings.rebuild_command.replace(HOST_PLACEHOLDER, host)
 }
 
-/// Ask the flake which hosts it defines. Only attribute names are evaluated, so nothing is built.
 fn discover(settings: &Settings) -> Result<Vec<String>> {
     let output = Command::new("nix")
         .args([
@@ -528,7 +455,6 @@ fn discover(settings: &Settings) -> Result<Vec<String>> {
         .context("running nix eval")?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        // A flake with no nixosConfigurations is a normal flake, not a broken one.
         if detail.contains("does not provide attribute") {
             return Ok(Vec::new());
         }
@@ -540,27 +466,17 @@ fn discover(settings: &Settings) -> Result<Vec<String>> {
     serde_json::from_slice(&output.stdout).context("reading the host list nix printed")
 }
 
-/// Run the configured update command in the user's terminal.
-///
-/// Nothing here has a default that changes a system: an unconfigured command is refused rather
-/// than guessed at, because guessing wrong means running the wrong rebuild on someone's machine.
 pub fn update() -> Result<String> {
     let settings = settings();
     run_in_terminal(&settings, &settings.update_command, "nix_update_command")
 }
 
-/// Rebuild, optionally naming which host to rebuild.
-///
-/// The command comes from that host's own configuration, so an alias that already targets a
-/// machine is run as written rather than rewritten from a template.
 pub fn rebuild(host: Option<&str>) -> Result<String> {
     let settings = settings();
     let wanted = host.unwrap_or("").trim().to_string();
     let known = hosts().unwrap_or_default();
 
     let chosen = if wanted.is_empty() {
-        // One host is unambiguous; several are not, and picking one for the user is how the wrong
-        // machine gets rebuilt.
         match known.as_slice() {
             [only] => only.clone(),
             [] => Host {
@@ -610,7 +526,6 @@ pub fn rebuild(host: Option<&str>) -> Result<String> {
     run_in_terminal(&settings, &chosen.rebuild, "nix_rebuild_command")
 }
 
-/// What a rebuild command writes where the host name goes.
 const HOST_PLACEHOLDER: &str = "%HOST%";
 
 fn run_in_terminal(settings: &Settings, command: &str, key: &str) -> Result<String> {
@@ -620,20 +535,15 @@ fn run_in_terminal(settings: &Settings, command: &str, key: &str) -> Result<Stri
     if !settings.configured() {
         bail!("no flake configured (set nix_flake)");
     }
-    // From the flake's directory, which is what makes `--flake .#host` and a bare `nix flake
-    // update` mean what the user expects.
     crate::terminal::run(command, Some(&settings.flake), &settings.terminal)
 }
 
-/// Start the background checker. Does nothing when no flake is configured or the interval is zero.
 pub fn watch() {
     let settings = settings();
     if !settings.configured() || settings.interval.is_zero() {
         return;
     }
     std::thread::spawn(move || {
-        // A check at startup would compete with everything else a session does when it starts, and
-        // the answer is not urgent: the first one happens a minute in.
         std::thread::sleep(Duration::from_secs(60));
         loop {
             if let Err(err) = check() {
@@ -702,7 +612,6 @@ mod tests {
 
     #[test]
     fn a_follows_input_has_no_revision_to_compare() {
-        // `inputs.foo.follows = "nixpkgs"` is recorded as an array, not a node id.
         let mut value = lock("aaa", "bbb");
         value["nodes"]["root"]["inputs"]["foo"] = json!(["nixpkgs"]);
         let parsed = parse_lock(&value);
@@ -729,8 +638,6 @@ mod tests {
 
     #[test]
     fn an_input_the_candidate_does_not_have_is_not_an_update() {
-        // A dropped input has nothing newer to move to, and reporting it as updatable would send
-        // the user to run an update that changes nothing.
         let current = parse_lock(&lock("aaa", "bbb"));
         let mut dropped = lock("aaa", "bbb");
         dropped["nodes"]["root"]["inputs"]
@@ -783,7 +690,6 @@ mod tests {
 
     #[test]
     fn a_configured_host_keeps_its_own_command() {
-        // An alias already knows its target; rewriting it from a template rebuilds the wrong box.
         let settings = settings_with(
             vec![host("thor", "rebuild-thor")],
             "sudo nixos-rebuild switch --flake .#%HOST%",

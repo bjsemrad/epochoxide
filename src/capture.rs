@@ -1,21 +1,3 @@
-//! Screen capture.
-//!
-//! Screenshots are taken with `grim`, regions are chosen with `slurp`, text is read out of them
-//! with `tesseract`, the result is put on the clipboard with `wl-copy`, and the user is told about
-//! it with `notify-send` -- which the shell itself answers, since EpochShell is the session's
-//! notification server.
-//!
-//! Three things are deliberately kept out of here:
-//!
-//! 1. **Compositor knowledge.** Window capture needs a rectangle, and that comes from the
-//!    normalized [`compositor`] layer, not from `hyprctl`. A compositor that does not report
-//!    on-screen geometry says so, and the caller is told to draw a region instead of being handed
-//!    coordinates that mean something else.
-//! 2. **UI.** Nothing here draws. The notification is the whole of the feedback, and it carries
-//!    the file path so the shell can render a thumbnail of the shot.
-//! 3. **Policy.** Whether to copy, save, or notify is the caller's to decide; the config only
-//!    supplies the defaults for the flags a caller leaves unset.
-
 use crate::compositor;
 use crate::config::Config;
 use anyhow::{anyhow, bail, Context, Result};
@@ -26,19 +8,14 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// What to point the camera at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
-    /// A rectangle the user drags out.
     #[default]
     Region,
-    /// One window, taken from compositor geometry.
     Window,
-    /// One whole monitor -- the focused one unless another is named.
     #[serde(alias = "screen", alias = "monitor", alias = "output")]
     Fullscreen,
-    /// Every monitor, as one image of the whole output layout.
     #[serde(alias = "everything")]
     All,
 }
@@ -64,52 +41,35 @@ impl Mode {
     }
 }
 
-/// One screenshot request. Every `Option` means "use the configured default".
 #[derive(Debug, Clone, Default)]
 pub struct Request {
     pub mode: Mode,
-    /// Monitor name for `Fullscreen`, from `compositor.monitors`.
     pub output: Option<String>,
-    /// In `Window` mode, click a window instead of capturing the focused one.
     pub select: bool,
-    /// Include the mouse pointer.
     pub cursor: bool,
-    /// Wait this long before capturing, after any selection is made.
     pub delay: Duration,
     pub copy: Option<bool>,
     pub save: Option<bool>,
     pub notify: Option<bool>,
-    /// Open the shot in satty to annotate it, overriding `screenshot_annotate`.
     pub annotate: Option<bool>,
-    /// Where to save, overriding `screenshot_dir`.
     pub directory: Option<PathBuf>,
-    /// Tesseract language for `ocr`, overriding `ocr_language`.
     pub language: Option<String>,
 }
 
-/// What a capture produced. A cancelled selection is a result, not an error: pressing Escape is
-/// how people change their mind, and a keybinding should not report a failure for it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Shot {
     pub cancelled: bool,
     pub mode: String,
-    /// Where the image is. Present even when `saved` is false, because a copy-only shot still
-    /// leaves a scratch file behind for the notification thumbnail to use.
     pub path: Option<String>,
     pub saved: bool,
     pub copied: bool,
     pub notified: bool,
-    /// The captured rectangle as `x,y WxH`, when one was chosen.
     pub geometry: Option<String>,
     pub output: Option<String>,
-    /// Title of the captured window, in window mode.
     pub window: Option<String>,
     pub width: u32,
     pub height: u32,
     pub bytes: u64,
-    /// The shot went to the annotation editor rather than straight to the clipboard or a file:
-    /// copying and saving are the editor's to do now, when the user is done. Defaulted so an
-    /// older daemon's answer still reads.
     #[serde(default)]
     pub annotating: bool,
 }
@@ -134,8 +94,6 @@ impl Shot {
     }
 }
 
-/// What an OCR pass read. Empty text is a result, not a failure: a region with nothing legible in
-/// it is a thing that happens, and it is worth saying so rather than raising an error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Text {
     pub cancelled: bool,
@@ -147,7 +105,6 @@ pub struct Text {
     pub notified: bool,
     pub language: String,
     pub geometry: Option<String>,
-    /// The image the text was read from, kept only when the request asked to save it.
     pub path: Option<String>,
     pub saved: bool,
 }
@@ -170,27 +127,19 @@ impl Text {
     }
 }
 
-/// A screen recording, running or finished.
-///
-/// The same shape answers "start", "stop", and "what is happening", so a caller polling for the
-/// bar indicator and a caller that just pressed stop read the same fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Session {
     pub recording: bool,
-    /// True when the user cancelled the selection instead of starting anything.
     pub cancelled: bool,
     pub mode: String,
     pub path: Option<String>,
     pub geometry: Option<String>,
     pub output: Option<String>,
-    /// How long it has been running, or ran for.
     pub seconds: u64,
-    /// Size of the finished file. Zero while it is still being written.
     pub bytes: u64,
     pub notified: bool,
 }
 
-/// One external tool capture needs, and what stops working without it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tool {
     pub name: String,
@@ -199,8 +148,6 @@ pub struct Tool {
     pub path: Option<String>,
 }
 
-/// Everything a caller needs to explain the capture setup: where shots land, what the defaults
-/// are, which tools are installed, and whether window capture can work at all here.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Status {
     pub directory: String,
@@ -209,15 +156,10 @@ pub struct Status {
     pub save: bool,
     pub notify: bool,
     pub tools: Vec<Tool>,
-    /// False when the running compositor does not report window geometry, which is what
-    /// `mode: "window"` needs.
     pub window_capture: bool,
-    /// False when tesseract is not installed, which is what `capture.ocr` needs.
     pub ocr: bool,
     pub ocr_language: String,
-    /// False when wf-recorder is not installed, which is what `capture.record` needs.
     pub record: bool,
-    /// Whether shots can be annotated: satty is installed.
     #[serde(default)]
     pub annotate: bool,
     pub recording_directory: String,
@@ -231,11 +173,8 @@ const TESSERACT: &str = "tesseract";
 const WF_RECORDER: &str = "wf-recorder";
 const SATTY: &str = "satty";
 
-/// How many copy-only screenshots to keep in the scratch directory.
-///
-/// A shot that is not being saved still has to exist as a file: `wl-copy` reads it, and the
-/// notification points at it for its thumbnail. Deleting it the moment the copy is done races the
-/// shell reading it, so the files are kept and the oldest are pruned instead.
+/// Copy-only shots stay on disk briefly: wl-copy and the notification thumbnail read the file, so
+/// deleting it at once races them.
 const SCRATCH_KEPT: usize = 20;
 
 #[derive(Debug, Clone)]
@@ -294,8 +233,6 @@ fn settings() -> Settings {
     SETTINGS.get().cloned().unwrap_or_default()
 }
 
-/// Whether capture can work here. Reported by `api.describe` so a shell can hide capture actions
-/// rather than offering something that will fail.
 pub fn available() -> Result<(), String> {
     if which(GRIM).is_none() {
         return Err(format!("{GRIM} is not installed"));
@@ -334,7 +271,6 @@ pub fn status() -> Status {
     }
 }
 
-/// A captured frame, sitting in a file, before anything has been decided about what to do with it.
 struct Frame {
     path: PathBuf,
     geometry: Option<String>,
@@ -345,7 +281,6 @@ struct Frame {
     bytes: u64,
 }
 
-/// What the user pointed at: a rectangle, a whole output, or the entire layout.
 #[derive(Debug, Clone, Default)]
 struct Target {
     geometry: Option<String>,
@@ -353,10 +288,6 @@ struct Target {
     window: Option<String>,
 }
 
-/// Work out what to point the camera at, asking the user when the mode calls for it.
-///
-/// `Ok(None)` is a cancelled selection rather than a failure. This is shared by every capture --
-/// a still, an OCR pass, a recording -- so "what does region mean" is answered in one place.
 fn choose_target(request: &Request) -> Result<Option<Target>> {
     let mut target = Target::default();
     match request.mode {
@@ -372,8 +303,6 @@ fn choose_target(request: &Request) -> Result<Option<Target>> {
             None => return Ok(None),
         },
         Mode::Fullscreen => {
-            // Falling back to the whole layout is better than refusing: a single-monitor session
-            // whose compositor does not report a focused output still gets its capture.
             target.output = request.output.clone().or_else(compositor::focused_monitor);
         }
         Mode::All => {}
@@ -381,18 +310,10 @@ fn choose_target(request: &Request) -> Result<Option<Target>> {
     Ok(Some(target))
 }
 
-/// Ask what to capture, capture it, and leave it in a file.
-///
-/// `Ok(None)` is a cancelled selection rather than a failure. `save` decides where the file lands:
-/// a kept capture goes to the screenshot directory under its configured name, and everything else
-/// to the pruned scratch directory, because even a capture nobody wants to keep has to exist as a
-/// file for the clipboard, for tesseract, and for the notification's thumbnail.
 fn capture(request: &Request, save: bool) -> Result<Option<Frame>> {
     let settings = settings();
     require(GRIM)?;
 
-    // Selection happens before the delay so the delay is a chance to arrange what is on screen,
-    // not dead time before the user is even asked what to capture.
     let Some(target) = choose_target(request)? else {
         return Ok(None);
     };
@@ -442,7 +363,6 @@ fn capture(request: &Request, save: bool) -> Result<Option<Frame>> {
     }))
 }
 
-/// Take a screenshot, then copy it, save it, and announce it as the request asks.
 pub fn screenshot(request: &Request) -> Result<Shot> {
     let settings = settings();
     let copy = request.copy.unwrap_or(settings.copy);
@@ -458,8 +378,6 @@ pub fn screenshot(request: &Request) -> Result<Shot> {
         return Ok(Shot::cancelled(request.mode));
     };
 
-    // A copy that fails is worth reporting rather than swallowing: the user asked for the shot to
-    // be on the clipboard, and a silent "it worked" would send them pasting into nothing.
     let copied = if copy {
         copy_image(&frame.path).context("copying the screenshot to the clipboard")?;
         true
@@ -473,8 +391,6 @@ pub fn screenshot(request: &Request) -> Result<Shot> {
         path: Some(frame.path.display().to_string()),
         saved: save,
         copied,
-        // A missing notify-send is not a failed screenshot, so the notification is best-effort and
-        // the result says whether it actually went out.
         notified: notify && announce_shot(&frame, save, copied).is_ok(),
         geometry: frame.geometry,
         output: frame.output,
@@ -487,18 +403,6 @@ pub fn screenshot(request: &Request) -> Result<Shot> {
     Ok(shot)
 }
 
-/// Capture, then hand the shot to satty instead of copying or saving it: what to keep is decided
-/// after the drawing is done, in the editor.
-///
-/// The frame goes to the scratch directory, never straight to the screenshots folder -- an
-/// unannotated original saved beside the annotated one would be a second file nobody asked for.
-/// Satty is told where the finished shot belongs: the screenshots folder when saving is on (and no
-/// output file at all when it is off, so nothing can land on disk), and the clipboard by way of
-/// `wl-copy`. Enter does what the switches say; Ctrl+C and Ctrl+S are there too, and satty closes
-/// itself once one has been done.
-///
-/// Started and left: the user may take a minute over it, and this call answers the moment the
-/// editor is open. A thread waits on it so it is reaped when it closes.
 fn annotate_shot(request: &Request, copy: bool, save: bool) -> Result<Shot> {
     let settings = settings();
     require(SATTY)?;
@@ -548,8 +452,6 @@ fn annotate_shot(request: &Request, copy: bool, save: bool) -> Result<Shot> {
     })
 }
 
-/// How satty is started on a shot. Enter does what the panel's switches asked for -- copy, save,
-/// or both -- and satty exits after it, as it does after Ctrl+C or Ctrl+S.
 fn satty_args(input: &Path, output: Option<&Path>, copy: bool) -> Vec<String> {
     let mut args = vec![
         "--filename".to_string(),
@@ -580,11 +482,6 @@ fn satty_args(input: &Path, output: Option<&Path>, copy: bool) -> Vec<String> {
     args
 }
 
-/// Capture a region and read the text out of it.
-///
-/// The image is a means to an end here, so it is not kept unless the request asks: what the user
-/// wanted is on the clipboard, and a screenshots folder filling up with pictures of text nobody
-/// will look at again is not a feature.
 pub fn ocr(request: &Request) -> Result<Text> {
     let settings = settings();
     let copy = request.copy.unwrap_or(settings.copy);
@@ -635,13 +532,6 @@ pub fn ocr(request: &Request) -> Result<Text> {
     })
 }
 
-// --- Recording ---------------------------------------------------------------
-
-/// The recording in flight, if there is one.
-///
-/// A recording is the one stateful thing in this module: it outlives the request that started it,
-/// so the daemon holds the process rather than the connection. Only one runs at a time -- two
-/// recorders would fight over the same file name and produce two files nobody asked for.
 struct Recording {
     child: std::process::Child,
     path: PathBuf,
@@ -649,14 +539,11 @@ struct Recording {
     geometry: Option<String>,
     output: Option<String>,
     started: Instant,
-    /// Whatever the recorder said, drained by a thread so a full pipe can never stall it.
     log: Arc<Mutex<String>>,
 }
 
 static RECORDING: Mutex<Option<Recording>> = Mutex::new(None);
 
-/// How long to let the recorder finish writing the file after being asked to stop, before it is
-/// killed outright. Finalizing an MP4 is quick; this is the bound on a recorder that has wedged.
 const STOP_GRACE: Duration = Duration::from_secs(10);
 
 fn recordings() -> Result<std::sync::MutexGuard<'static, Option<Recording>>> {
@@ -665,7 +552,6 @@ fn recordings() -> Result<std::sync::MutexGuard<'static, Option<Recording>>> {
         .map_err(|_| anyhow!("the recording lock is poisoned"))
 }
 
-/// Start recording. Fails rather than silently replacing a recording already in progress.
 pub fn record(request: &Request) -> Result<Session> {
     require(WF_RECORDER)?;
     let settings = settings();
@@ -703,10 +589,8 @@ pub fn record(request: &Request) -> Result<Session> {
 
     let mut command = Command::new(WF_RECORDER);
     command.args(["-f", &destination.display().to_string()]);
-    // Recording at a constant rate is not a quality setting, it is what makes the file playable.
-    // Left to time itself, wf-recorder writes a stream declaring 90000fps, from which x264 derives
-    // level 6.2 -- above what players will decode, so the video opens and shows black while the
-    // frames inside it are perfectly good.
+    // A constant rate is what makes the file playable: left alone, wf-recorder declares 90000fps,
+    // x264 picks level 6.2, and players show black.
     if settings.recording_framerate > 0 {
         command.args(["-r", &settings.recording_framerate.to_string()]);
     }
@@ -716,8 +600,8 @@ pub fn record(request: &Request) -> Result<Session> {
     if let Some(output) = &target.output {
         command.args(["-o", output]);
     }
-    // The recorder outlives this request, so it must not hold the caller's stdout; its own
-    // reporting is drained into a buffer instead, where a failure can still be quoted back.
+    // The recorder outlives the request, so it must not hold the caller's stdout; its output is
+    // drained into a buffer instead.
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -739,9 +623,6 @@ pub fn record(request: &Request) -> Result<Session> {
         });
     }
 
-    // A recorder that cannot start -- no output by that name, no permission to write -- dies
-    // immediately, and reporting that now is far better than a bar indicator counting up against
-    // a process that is already gone.
     std::thread::sleep(Duration::from_millis(400));
     if let Some(status) = child.try_wait()? {
         let detail = log.lock().ok().map(|log| log.trim().to_string());
@@ -776,10 +657,6 @@ pub fn record(request: &Request) -> Result<Session> {
     Ok(session)
 }
 
-/// Stop the recording and wait for the file to be finished.
-///
-/// Stopping when nothing is recording is not an error: a keybinding bound to "stop" pressed twice
-/// should say so quietly rather than fail.
 pub fn stop_recording(notify: Option<bool>) -> Result<Session> {
     let notify = notify.unwrap_or_else(|| settings().recording_notify);
     let Some(mut running) = recordings()?.take() else {
@@ -787,13 +664,10 @@ pub fn stop_recording(notify: Option<bool>) -> Result<Session> {
     };
 
     let seconds = running.started.elapsed().as_secs();
-    // SIGINT is what tells wf-recorder to finalize the file rather than abandon it. Sent through
-    // kill(1) because nothing else here needs libc, and a signal is not worth a dependency.
+    // SIGINT tells wf-recorder to finalize the file rather than abandon it.
     let interrupted = signal(&running.child, "INT");
     let finished = wait_for(&mut running.child, STOP_GRACE);
     if !finished {
-        // A recorder that will not stop leaves a file that may still be usable, so it is killed
-        // rather than left holding the screen capture open forever.
         signal(&running.child, "KILL");
         let _ = running.child.wait();
     }
@@ -802,8 +676,6 @@ pub fn stop_recording(notify: Option<bool>) -> Result<Session> {
         .map(|meta| meta.len())
         .unwrap_or(0);
     let path = running.path.display().to_string();
-    // An empty file means the recorder never wrote anything worth keeping; saying "saved" over
-    // that would be a lie, and the file itself is not worth leaving behind.
     let failed = bytes == 0;
     if failed {
         let _ = std::fs::remove_file(&running.path);
@@ -855,10 +727,6 @@ pub fn stop_recording(notify: Option<bool>) -> Result<Session> {
     })
 }
 
-/// What is being recorded right now, if anything.
-///
-/// A recorder that has died on its own -- the disk filled, the output was unplugged -- is noticed
-/// here and cleared, so a bar indicator polling this stops counting up against a dead process.
 pub fn recording() -> Result<Session> {
     let mut slot = recordings()?;
     let Some(running) = slot.as_mut() else {
@@ -891,7 +759,6 @@ pub fn recording() -> Result<Session> {
     })
 }
 
-/// Send a signal by name. Returns whether the signal was delivered.
 fn signal(child: &std::process::Child, name: &str) -> bool {
     Command::new("kill")
         .arg(format!("-{name}"))
@@ -903,7 +770,6 @@ fn signal(child: &std::process::Child, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Wait for a child for at most `grace`. Returns whether it actually exited.
 fn wait_for(child: &mut std::process::Child, grace: Duration) -> bool {
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
@@ -922,7 +788,6 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// The last non-empty line of a tool's output: recorders log a lot, and the failure is at the end.
 fn last_line(text: &str) -> String {
     text.lines()
         .rev()
@@ -932,7 +797,6 @@ fn last_line(text: &str) -> String {
         .to_string()
 }
 
-/// A duration as a person reads it back: `0:42`, `3:07`, `1:02:13`.
 fn human_duration(seconds: u64) -> String {
     let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
     if hours > 0 {
@@ -942,7 +806,6 @@ fn human_duration(seconds: u64) -> String {
     }
 }
 
-/// A file size in the units a person reads, not bytes.
 fn human_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -954,8 +817,6 @@ fn human_bytes(bytes: u64) -> String {
         _ => format!("{:.2} GB", bytes as f64 / GB as f64),
     }
 }
-
-// --- Capture -----------------------------------------------------------------
 
 fn grim(
     destination: &Path,
@@ -973,9 +834,6 @@ fn grim(
     if let Some(output) = output {
         command.args(["-o", output]);
     }
-    // grim decides the format from the extension only for `-` output, so it is named explicitly.
-    // A name grim cannot write is a mistake in screenshot_filename, and writing PNG bytes into it
-    // under another extension would hide that rather than fix it.
     match image_format(destination) {
         Some(format) => {
             command.args(["-t", format]);
@@ -1001,13 +859,11 @@ fn grim(
     Ok(())
 }
 
-/// Ask the user to drag out a rectangle. `None` means they cancelled.
 fn select_region() -> Result<Option<String>> {
     require(SLURP)?;
     slurp(&[], None)
 }
 
-/// The window to capture: the focused one, or one the user clicks when `select` is set.
 fn window_region(select: bool) -> Result<Option<compositor::WindowRegion>> {
     let regions = compositor::window_regions().ok_or_else(|| {
         let backend = compositor::active()
@@ -1028,7 +884,7 @@ fn window_region(select: bool) -> Result<Option<compositor::WindowRegion>> {
                 .find(|region| region.focused)
                 .cloned()
                 // Nothing focused is normal right after the launcher takes focus as a layer
-                // surface, and one window on screen is unambiguous anyway.
+                // surface.
                 .or_else(|| regions.first().cloned())
                 .expect("regions is not empty"),
         ));
@@ -1043,15 +899,10 @@ fn window_region(select: bool) -> Result<Option<compositor::WindowRegion>> {
         .iter()
         .find(|region| region.geometry() == chosen)
         .cloned()
-        // slurp lets the user drag a fresh rectangle even in restricted mode, so a selection that
-        // matches no window is still a selection -- it is just not a window.
         .or_else(|| parse_geometry(&chosen).ok()))
 }
 
-/// Run slurp, optionally feeding it the boxes it should restrict the selection to.
-///
-/// slurp exits non-zero when the user presses Escape, which is a cancellation rather than a
-/// failure; it is told apart from a real error by having said nothing on stdout.
+/// slurp exits non-zero on Escape; a cancel is told apart from an error by empty stdout.
 fn slurp(args: &[&str], boxes: Option<&str>) -> Result<Option<String>> {
     let mut command = Command::new(SLURP);
     command.args(args);
@@ -1086,7 +937,6 @@ fn slurp(args: &[&str], boxes: Option<&str>) -> Result<Option<String>> {
     Ok(Some(selection))
 }
 
-/// Parse slurp's `x,y WxH` back into a rectangle.
 fn parse_geometry(geometry: &str) -> Result<compositor::WindowRegion> {
     let invalid = || anyhow!("could not read the selected geometry \"{geometry}\"");
     let (position, size) = geometry.trim().split_once(' ').ok_or_else(invalid)?;
@@ -1105,8 +955,6 @@ fn parse_geometry(geometry: &str) -> Result<compositor::WindowRegion> {
     })
 }
 
-// --- Afterwards ---------------------------------------------------------------
-
 fn copy_image(path: &Path) -> Result<()> {
     require(WL_COPY)?;
     let data = std::fs::read(path)?;
@@ -1115,10 +963,8 @@ fn copy_image(path: &Path) -> Result<()> {
         Some("ppm") => "image/x-portable-pixmap",
         _ => "image/png",
     };
-    // wl-copy forks a background process to hold the selection until something replaces it, and
-    // that process inherits whatever stdout it was given. Left inherited, it holds a pipe open
-    // long after this command has finished -- `epochctl capture ocr | wc -l` would sit there
-    // until the next copy. Handing it nothing costs nothing: it has nothing to say.
+    // wl-copy forks a process that holds the selection and inherits our stdout; left inherited it
+    // holds the pipe open (`epochctl capture ocr | wc -l` would hang).
     let mut child = Command::new(WL_COPY)
         .args(["--type", mime])
         .stdin(Stdio::piped())
@@ -1132,8 +978,6 @@ fn copy_image(path: &Path) -> Result<()> {
         .ok_or_else(|| anyhow!("clipboard stdin unavailable"))?
         .write_all(&data)?;
     drop(child.stdin.take());
-    // wl-copy forks a background process to hold the selection and exits, so waiting here costs
-    // nothing and turns "the clipboard tool is broken" into a reported failure.
     let status = child.wait()?;
     if !status.success() {
         bail!("{WL_COPY} exited with {status}");
@@ -1141,10 +985,7 @@ fn copy_image(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Read the text out of an image.
-///
-/// tesseract writes its own progress and warnings to stderr and still exits 0, so only a non-zero
-/// exit is a failure; an empty answer means the region had nothing legible in it.
+/// tesseract warns on stderr and still exits 0, so only a non-zero exit is a failure.
 fn read_text(path: &Path, language: &str) -> Result<String> {
     let out = Command::new(TESSERACT)
         .arg(path)
@@ -1164,8 +1005,6 @@ fn read_text(path: &Path, language: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// tesseract takes `eng`, or several joined with `+`. Anything else is a typo worth naming now
-/// rather than a confusing tesseract error after the user has already chosen a region.
 fn validate_language(language: &str) -> Result<()> {
     let valid = !language.is_empty()
         && language
@@ -1200,8 +1039,6 @@ fn copy_text(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Tell the session a shot was taken. The image path goes along as a hint so the shell can show
-/// the shot itself rather than a generic camera icon.
 fn announce_shot(frame: &Frame, saved: bool, copied: bool) -> Result<()> {
     let summary = match (saved, copied) {
         (true, true) => "Screenshot saved and copied",
@@ -1227,8 +1064,6 @@ fn announce_shot(frame: &Frame, saved: bool, copied: bool) -> Result<()> {
     announce(summary, &body, Some(&frame.path))
 }
 
-/// Tell the session what was read. The text itself is the body, trimmed to a few lines: the point
-/// is to confirm the right thing was captured, and the whole of it is on the clipboard anyway.
 fn announce_text(frame: &Frame, text: &str, copied: bool) -> Result<()> {
     if text.is_empty() {
         return announce(
@@ -1245,7 +1080,6 @@ fn announce_text(frame: &Frame, text: &str, copied: bool) -> Result<()> {
     announce(summary, &preview(text, 3, 160), Some(&frame.path))
 }
 
-/// The first few lines of `text`, ellipsised, for a notification body.
 fn preview(text: &str, lines: usize, characters: usize) -> String {
     let mut out = String::new();
     let mut taken = 0;
@@ -1267,15 +1101,10 @@ fn preview(text: &str, lines: usize, characters: usize) -> String {
     out
 }
 
-/// Send one capture notification. Captures share a tag so a run of them replaces itself in the
-/// toast stack rather than burying the screen.
 fn announce(summary: &str, body: &str, image: Option<&Path>) -> Result<()> {
     crate::notify::send(summary, body, "camera-photo", image, "epoch-screenshot")
 }
 
-// --- Files --------------------------------------------------------------------
-
-/// Where copy-only shots live: they are scratch, not part of the user's screenshot collection.
 fn scratch_dir() -> Result<PathBuf> {
     let directory = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -1285,7 +1114,6 @@ fn scratch_dir() -> Result<PathBuf> {
     Ok(directory)
 }
 
-/// Keep the `keep` newest files in `directory` and delete the rest.
 fn prune(directory: &Path, keep: usize) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
@@ -1306,14 +1134,6 @@ fn prune(directory: &Path, keep: usize) {
     }
 }
 
-/// Expand the configured filename template through `date`, which is what makes `%Y-%m-%d` mean
-/// what the user expects in their own timezone.
-///
-/// `fallback` is the extension to use when the template names no file type at all. It is passed in
-/// rather than assumed, because what a capture should be called depends on what it is: a still is
-/// a `.png`, a recording is an `.mp4`, and a helper that knows only about images turns
-/// `recording-%H%M%S.mp4` into `recording-102636.mp4.png` -- which ffmpeg then tries to write as a
-/// single image and gives up on.
 fn filename(template: &str, fallback: &str) -> String {
     let expanded = Command::new("date")
         .arg(format!("+{template}"))
@@ -1322,8 +1142,6 @@ fn filename(template: &str, fallback: &str) -> String {
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .unwrap_or_default();
-    // A template that expands to nothing, or to something with a path separator in it, would put
-    // the file somewhere the caller did not ask for.
     let name = if expanded.is_empty() || expanded.contains('/') {
         format!("screenshot-{}", epoch_seconds())
     } else {
@@ -1343,7 +1161,6 @@ fn epoch_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-/// `directory/name`, with `-1`, `-2`, … appended until nothing is overwritten.
 fn unique(directory: &Path, name: &str) -> PathBuf {
     let candidate = directory.join(name);
     if !candidate.exists() {
@@ -1367,7 +1184,6 @@ fn unique(directory: &Path, name: &str) -> PathBuf {
     directory.join(format!("{stem}-{}{extension}", epoch_seconds()))
 }
 
-/// The grim format name for a path's extension, or `None` when it names no image format.
 fn image_format(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_string_lossy().to_lowercase().as_str() {
         "png" => Some("png"),
@@ -1377,8 +1193,6 @@ fn image_format(path: &Path) -> Option<&'static str> {
     }
 }
 
-/// Read a PNG's dimensions out of its IHDR chunk, so the notification can say how big the shot is
-/// without decoding the image.
 fn png_size(path: &Path) -> Option<(u32, u32)> {
     use std::io::Read;
     let mut header = [0u8; 24];
@@ -1394,8 +1208,6 @@ fn png_size(path: &Path) -> Option<(u32, u32)> {
     };
     Some((read(16), read(20)))
 }
-
-// --- Tools --------------------------------------------------------------------
 
 fn which(binary: &str) -> Option<PathBuf> {
     which::which(binary).ok()
@@ -1440,7 +1252,6 @@ mod tests {
 
     #[test]
     fn a_negative_origin_is_a_real_position_not_an_error() {
-        // A monitor left of the primary one has negative coordinates in the output layout.
         let region = parse_geometry("-2060,46 2102x1388").expect("parsed");
         assert_eq!((region.x, region.y), (-2060, 46));
     }
@@ -1456,9 +1267,7 @@ mod tests {
     fn a_filename_template_always_produces_an_image_name() {
         assert_eq!(filename("shot.png", "png"), "shot.png");
         assert_eq!(filename("shot.jpg", "png"), "shot.jpg");
-        // No extension, so one is added rather than leaving grim to guess.
         assert_eq!(filename("shot", "png"), "shot.png");
-        // A recording keeps the container it names, and gets mp4 when it names none.
         assert_eq!(filename("clip.mkv", "mp4"), "clip.mkv");
         assert_eq!(filename("clip", "mp4"), "clip.mp4");
     }
@@ -1494,7 +1303,6 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         for index in 0..5 {
             std::fs::write(directory.path().join(format!("{index}.png")), b"").expect("write");
-            // Distinct modification times, which is what the prune orders on.
             std::thread::sleep(Duration::from_millis(10));
         }
         prune(directory.path(), 10);
@@ -1576,7 +1384,6 @@ mod tests {
 
     #[test]
     fn a_failure_is_reported_from_the_end_of_the_log() {
-        // Recorders log a wall of setup before the line that matters.
         let log = "selected region\nSetting codec option: crf=20\n\nfailed to open output\n";
         assert_eq!(last_line(log), "failed to open output");
         assert_eq!(last_line(""), "");
@@ -1584,8 +1391,6 @@ mod tests {
 
     #[test]
     fn nothing_is_recording_until_something_starts() {
-        // The empty session is what a caller polling for the bar indicator sees, so it must be
-        // honest about having no file and no elapsed time rather than defaulting to true.
         let idle = Session::default();
         assert!(!idle.recording);
         assert!(!idle.cancelled);

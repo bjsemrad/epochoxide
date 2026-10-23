@@ -33,13 +33,6 @@ const BROWSER_PREFIXES: [&str; 6] = [
     "vivaldi-",
 ];
 
-/// Desktop-entry keys to try for a window class, best first.
-///
-/// An exact match covers well-behaved apps. Chromium-family web apps do not report the
-/// `StartupWMClass` their .desktop file declares — they report `brave-gmail.com__-Default` or
-/// `brave-mail.proton.me__u_0_inbox-Default` — so the host is peeled out of the class and tried
-/// as a name, then by domain, and finally the browser itself so a web app at least gets the
-/// browser's icon instead of a generic window.
 fn icon_candidates(app: &str) -> Vec<String> {
     let key = app.to_lowercase();
     let mut out = vec![key.clone()];
@@ -95,8 +88,6 @@ impl Provider for WindowsProvider {
         for window in compositor::windows() {
             let haystack = format!("{} {} {}", window.title, window.app_id, window.workspace);
             if let Some((score, info)) = fuzzy::score(query, &haystack, exact, "text") {
-                // Window::id is already backend-qualified, so it round-trips straight back to
-                // the compositor on activate.
                 let mut item = Item::new(self.name(), window.id, window.title);
                 item.subtext = format!("{} {}", window.app_id, window.workspace)
                     .trim()
@@ -168,7 +159,6 @@ mod tests {
 
     #[test]
     fn matches_chromium_webapp_class_by_host() {
-        // Brave reports these classes; the .desktop files declare StartupWMClass=gmail / proton.me.
         let provider = provider(&[("gmail", "gmail-icon"), ("proton.me", "proton-icon")]);
         assert_eq!(provider.icon_for("brave-gmail.com__-Default"), "gmail-icon");
         assert_eq!(

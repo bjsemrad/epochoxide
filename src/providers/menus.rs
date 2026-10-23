@@ -18,14 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How long a `command`-backed menu reuses the entries its generator produced, unless the menu
-/// overrides it with `cache_ms`. Menus are generated live (the keybinds menu asks the compositor
-/// for its binds), so opening one always re-runs the generator; this only stops it running again
-/// per keystroke while the user searches within what it returned.
 const ENTRY_TTL: Duration = Duration::from_millis(10_000);
 
-/// Regenerations closer together than this are skipped, so the shell's own repeat empty queries
-/// do not start a generator several times over.
 const MIN_REFRESH: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -56,13 +50,10 @@ struct MenuEntry {
 }
 
 impl MenuEntry {
-    /// Enter copies rather than runs when the entry carries `copy`.
     fn is_copy(&self) -> bool {
         self.copy.is_some()
     }
 
-    /// Actions in a stable order, `default`/`copy` first, so the shell's "first action is Enter"
-    /// rule lands on the same one every time (a HashMap's own order is not stable between runs).
     fn action_names(&self, menu: &Menu) -> Vec<String> {
         if self.is_copy() {
             return vec!["copy".into()];
@@ -100,12 +91,6 @@ impl MenuEntry {
     }
 }
 
-/// One configured menu, exposed as a provider of its own.
-///
-/// Menus used to be a single `menus` provider whose results were the menus themselves, so reaching
-/// an entry meant finding the menu and then drilling into it. Each menu is its own provider now:
-/// it takes a query prefix like any other (`[query_prefixes]` in the config), searches its entries
-/// directly, and shows up in the launcher's provider picker under its own name and icon.
 pub struct MenuProvider {
     name: String,
     pretty: String,
@@ -136,9 +121,6 @@ impl MenuProvider {
             cache: Arc::new(Mutex::new(None)),
             refreshing: Arc::new(AtomicBool::new(false)),
         };
-        // Generators are slow enough to be worth having ready before anyone asks: the keybinds
-        // menu shells out to the compositor and takes seconds, which is a launcher that shows
-        // nothing for seconds if the first query is what starts it.
         if provider.menu.command.is_some() {
             provider.spawn_refresh();
         }
@@ -167,12 +149,6 @@ impl MenuProvider {
         });
     }
 
-    /// `opening` means the menu is being shown rather than searched within, which is when a
-    /// dynamic menu should go and look at the thing it reports on again.
-    ///
-    /// A stale answer is served immediately and the regeneration happens behind it, so a slow
-    /// generator costs the user nothing after the first time. Only a menu nobody has generated
-    /// yet is waited on.
     fn entries(&mut self, opening: bool) -> Vec<MenuEntry> {
         let ttl = self
             .menu
@@ -212,7 +188,6 @@ impl MenuProvider {
             item.preview = command_preview(cmd);
             item.preview_type = "text".into();
         }
-        // Keeps the menu's own order when nothing is typed, where every fuzzy score is equal.
         item.score = (total - idx) as i32;
         item
     }
@@ -321,7 +296,6 @@ impl Provider for MenuProvider {
     }
 }
 
-/// Loads every `*.toml` in the menus directory as its own provider, in name order.
 pub fn providers(config: &Config) -> Result<Vec<Box<dyn Provider>>> {
     let dir = expand(&config.menus_dir);
     if !Path::new(&dir).exists() {
@@ -432,10 +406,7 @@ mod tests {
         assert_eq!(provider.query("", 10, false)[0].text, "first");
         wait_for_refresh(&provider);
         std::fs::write(&path, r#"[{"text":"second"}]"#).unwrap();
-        // Searching within the menu reuses what the generator already returned ...
         assert_eq!(provider.query("fir", 10, false)[0].text, "first");
-        // ... while opening it again regenerates behind the answer it hands back, so the new
-        // state is there next time rather than the user waiting on the generator.
         std::thread::sleep(super::MIN_REFRESH);
         assert_eq!(provider.query("", 10, false)[0].text, "first");
         for _ in 0..50 {

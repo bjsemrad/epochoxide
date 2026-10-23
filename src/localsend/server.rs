@@ -1,10 +1,3 @@
-//! The receiving half of LocalSend: a small HTTPS server plus a multicast responder.
-//!
-//! Only the endpoints a sender actually uses are implemented. A transfer arrives in two steps --
-//! `prepare-upload` asks permission and `upload` delivers the bytes -- and permission is the part
-//! that matters: `prepare-upload` blocks until someone accepts through the shell, or until the
-//! request expires. Nothing is written to disk before that.
-
 use super::cert;
 use anyhow::{anyhow, Context, Result};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -18,11 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// How long a sender is left waiting for someone to accept before the request is dropped.
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(120);
-/// How often a stopped receiver notices it should shut down.
 const ACCEPT_POLL: Duration = Duration::from_millis(150);
-/// Refuse absurd uploads outright rather than filling a disk.
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -30,18 +20,15 @@ pub struct IncomingFile {
     pub id: String,
     pub name: String,
     pub size: u64,
-    /// Set once the file has been written.
     pub saved_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IncomingTransfer {
     pub session: String,
-    /// The sending device's alias, as it described itself.
     pub device: String,
     pub fingerprint: String,
     pub files: Vec<IncomingFile>,
-    /// Seconds since the epoch, so a UI can age the request out.
     pub requested_at: u64,
 }
 
@@ -55,10 +42,7 @@ enum Decision {
 struct Session {
     transfer: IncomingTransfer,
     decision: Decision,
-    /// fileId -> upload token handed back on acceptance.
     tokens: HashMap<String, String>,
-    /// Where this transfer was accepted into, when the caller chose somewhere other than the
-    /// configured download directory.
     directory: Option<PathBuf>,
 }
 
@@ -68,24 +52,13 @@ struct Inner {
     port: u16,
     alias: String,
     fingerprint: String,
-    /// Files written since the daemon started, newest first.
     received: Vec<IncomingFile>,
-    /// Devices this machine has heard from, by fingerprint.
-    ///
-    /// The receiver is the only thing listening continuously, so it is the only place that
-    /// reliably hears every peer. A one-shot scan can miss answers: with the receiver running
-    /// there are two sockets bound to the discovery port, and the kernel hands a *unicast* reply
-    /// to just one of them. Recording here means it does not matter which one got it.
     seen: HashMap<String, super::Device>,
 }
 
-/// Shared receiver state. The condvar is how an accepted or declined request wakes the HTTP
-/// handler that is holding the sender's connection open.
 pub struct Receiver {
     inner: Mutex<Inner>,
     decided: Condvar,
-    /// Set to stop accepting. The worker threads check it and return, which drops the listener
-    /// and releases the port -- the whole point of being able to stop.
     stopping: AtomicBool,
 }
 
@@ -106,7 +79,6 @@ impl Receiver {
         self.inner.lock().unwrap().download_dir.clone()
     }
 
-    /// Transfers waiting on a decision.
     pub fn pending(&self) -> Vec<IncomingTransfer> {
         let inner = self.inner.lock().unwrap();
         inner
@@ -121,8 +93,6 @@ impl Receiver {
         self.inner.lock().unwrap().received.clone()
     }
 
-    /// Remember a device we heard from, whether it announced over multicast or registered
-    /// over HTTP.
     pub fn remember(&self, device: super::Device) {
         if device.fingerprint.is_empty() || device.fingerprint == self.fingerprint() {
             return;
@@ -134,7 +104,6 @@ impl Receiver {
             .insert(device.fingerprint.clone(), device);
     }
 
-    /// Every device heard from since the daemon started.
     pub fn seen(&self) -> Vec<super::Device> {
         self.inner.lock().unwrap().seen.values().cloned().collect()
     }
@@ -155,8 +124,6 @@ impl Receiver {
         Ok(())
     }
 
-    /// Accept a transfer. `directory` overrides the configured download directory for this
-    /// transfer only, so a caller can ask where the files should land.
     pub fn accept(&self, session: &str, directory: Option<PathBuf>) -> Result<()> {
         self.decide(session, Decision::Accepted, directory)
     }
@@ -165,12 +132,8 @@ impl Receiver {
         self.decide(session, Decision::Declined, None)
     }
 
-    /// This device, in the shape LocalSend announcements and `/info` use.
-    /// Ask the workers to stop. They notice within a poll interval, drop the listener and the
-    /// multicast socket, and the port is free for something else -- the LocalSend app, usually.
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::SeqCst);
-        // Wake anything waiting on a consent decision so it does not sit until its timeout.
         self.decided.notify_all();
     }
 
@@ -193,11 +156,8 @@ impl Receiver {
     }
 }
 
-/// Start the receiver, returning the shared state the API reads.
-///
-/// Binds `preferred` when it can and the next free port otherwise: the announcement carries
-/// whichever port was taken, and senders honour it, so a LocalSend app already holding the
-/// standard port is a fallback rather than a failure.
+/// Falls back to a free port when the LocalSend app holds the standard one; the announcement
+/// carries whichever was taken.
 pub fn start(alias: String, download_dir: PathBuf, preferred: u16) -> Result<Arc<Receiver>> {
     let identity = cert::shared()?;
     let (listener, port) = bind(preferred)?;
@@ -232,8 +192,6 @@ pub fn start(alias: String, download_dir: PathBuf, preferred: u16) -> Result<Arc
                     let _ = stream.set_nonblocking(false);
                     let config = Arc::clone(&config);
                     let receiver = Arc::clone(&serving);
-                    // One thread per transfer: a handler blocks for as long as consent takes, so
-                    // it must not hold up anything else.
                     std::thread::spawn(move || {
                         if let Err(err) = handle(stream, config, receiver) {
                             eprintln!("localsend: {err:#}");
@@ -262,7 +220,6 @@ fn bind(preferred: u16) -> Result<(TcpListener, u16)> {
     match TcpListener::bind(("0.0.0.0", preferred)) {
         Ok(listener) => Ok((listener, preferred)),
         Err(_) => {
-            // Port 0 lets the OS pick; whatever it gives is what gets announced.
             let listener = TcpListener::bind(("0.0.0.0", 0))
                 .context("binding a port for the LocalSend receiver")?;
             let port = listener.local_addr()?.port();
@@ -304,13 +261,8 @@ fn handle(stream: TcpStream, config: Arc<ServerConfig>, receiver: Arc<Receiver>)
     Ok(())
 }
 
-/// Read one request, honouring whichever framing the sender chose.
-///
-/// Both framings turn up in practice. A sender that knows the size up front sends a
-/// Content-Length; LocalSend's own client streams file uploads instead and frames them with
-/// `Transfer-Encoding: chunked`, the same way its server answers us (see `http::parse_response`).
-/// Reading only Content-Length made a chunked upload look like a zero-length body, which is how
-/// an accepted transfer landed on disk as an empty file.
+/// Both framings occur: Content-Length, and LocalSend's chunked uploads. Reading only Content-
+/// Length wrote accepted transfers as empty files.
 fn read_request<S: Read + Write>(stream: &mut S) -> Result<Request> {
     let mut raw = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -355,11 +307,10 @@ fn read_request<S: Read + Write>(stream: &mut S) -> Result<Request> {
             .map(|(_, value)| *value)
     };
 
-    // Whatever arrived alongside the head is already the start of the body.
     let mut body = raw[head_end + 4..].to_vec();
 
-    // A sender that asks permission first will not send a byte until it is told to go ahead --
-    // curl does this for any sizeable upload -- so silence here reads to it as a stall.
+    // A sender sending `Expect: 100-continue` (curl, for any sizeable body) waits for this before
+    // sending a byte.
     if body.is_empty()
         && header("expect").is_some_and(|value| value.eq_ignore_ascii_case("100-continue"))
     {
@@ -391,16 +342,11 @@ fn read_request<S: Read + Write>(stream: &mut S) -> Result<Request> {
     })
 }
 
-/// Read a chunked body: repeating `<hex size>CRLF<bytes>CRLF`, ending at a zero-size chunk.
-///
-/// `buffered` is however much of the body already came in with the head. Chunked framing declares
-/// no total up front, so `MAX_FILE_BYTES` is the only thing bounding what a sender can push here.
 fn read_chunked<S: Read>(stream: &mut S, buffered: Vec<u8>) -> Result<Vec<u8>> {
     let mut pending = buffered;
     let mut body: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
 
-    // Pull until `pending` holds at least `wanted` bytes, reporting whether the sender ran out.
     let mut fill = |pending: &mut Vec<u8>, wanted: usize, stream: &mut S| -> Result<bool> {
         while pending.len() < wanted {
             let read = stream.read(&mut chunk)?;
@@ -413,7 +359,6 @@ fn read_chunked<S: Read>(stream: &mut S, buffered: Vec<u8>) -> Result<Vec<u8>> {
     };
 
     loop {
-        // Every chunk opens with its size on a line of its own.
         let line_end = loop {
             if let Some(position) = pending.windows(2).position(|window| window == b"\r\n") {
                 break position;
@@ -427,7 +372,6 @@ fn read_chunked<S: Read>(stream: &mut S, buffered: Vec<u8>) -> Result<Vec<u8>> {
             }
         };
         let header = String::from_utf8_lossy(&pending[..line_end]).to_string();
-        // A chunk size may carry extensions after a semicolon.
         let size_text = header.split(';').next().unwrap_or_default().trim();
         let size = usize::from_str_radix(size_text, 16)
             .map_err(|_| anyhow!("the sender used an unreadable chunk size \"{size_text}\""))?;
@@ -438,13 +382,11 @@ fn read_chunked<S: Read>(stream: &mut S, buffered: Vec<u8>) -> Result<Vec<u8>> {
         if body.len() as u64 + size as u64 > MAX_FILE_BYTES {
             return Err(anyhow!("the upload is larger than this receiver accepts"));
         }
-        // The chunk's bytes plus the CRLF closing it.
         let complete = fill(&mut pending, size + 2, stream)?;
         let taken = size.min(pending.len());
         body.extend_from_slice(&pending[..taken]);
         pending.drain(..(taken + 2).min(pending.len()));
         if !complete {
-            // A sender that hangs up without its final zero chunk still delivered what arrived.
             break;
         }
     }
@@ -462,10 +404,8 @@ fn route(
     peer: Option<std::net::IpAddr>,
 ) -> (&'static str, Vec<u8>) {
     match (request.method.as_str(), request.path.as_str()) {
-        // Both the HTTP discovery fallback and the plain info lookup answer with this device.
         (_, "/api/localsend/v2/register") | ("GET", "/api/localsend/v2/info") => {
-            // A register is the other device announcing itself, so record it: answering without
-            // remembering is how this machine ended up visible to peers it could not itself see.
+            // Record registering devices, or peers see us while we cannot see them.
             if let (Some(address), Ok(payload)) =
                 (peer, serde_json::from_slice::<Value>(&request.body))
             {
@@ -500,8 +440,6 @@ fn now_seconds() -> u64 {
 }
 
 fn random_token() -> String {
-    // Tokens only need to be unguessable within one short-lived session; the system RNG is what
-    // rustls already brings.
     use ring::rand::SecureRandom;
     let mut bytes = [0u8; 16];
     let _ = ring::rand::SystemRandom::new().fill(&mut bytes);
@@ -572,8 +510,7 @@ fn prepare_upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str,
 
     {
         let mut inner = receiver.inner.lock().unwrap();
-        // One transfer at a time, which is what the LocalSend clients expect; a second sender is
-        // told to try again rather than silently queued behind a prompt.
+        // One transfer at a time, as LocalSend clients expect; a second sender is told to retry.
         if inner
             .sessions
             .values()
@@ -595,7 +532,6 @@ fn prepare_upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str,
         );
     }
 
-    // Hold the sender's connection while someone decides. Nothing has touched the disk yet.
     let decision = wait_for_decision(receiver, &session);
 
     let mut inner = receiver.inner.lock().unwrap();
@@ -636,7 +572,6 @@ fn wait_for_decision(receiver: &Arc<Receiver>, session: &str) -> Decision {
             return current;
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            // Nobody answered; treat silence as a refusal rather than leaving the sender hanging.
             return Decision::Declined;
         };
         let (guard, _) = receiver
@@ -667,8 +602,7 @@ fn upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str, Vec<u8>
                 json_body(json!({ "message": "unknown session" })),
             );
         };
-        // The token is the only thing authorising this write; a mismatch means the sender never
-        // had permission for this file.
+        // The token is the only thing authorising this write.
         if entry.decision != Decision::Accepted || entry.tokens.get(file_id) != Some(token) {
             return (
                 "403 Forbidden",
@@ -681,7 +615,6 @@ fn upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str, Vec<u8>
                 json_body(json!({ "message": "unknown file" })),
             );
         };
-        // Whatever the transfer was accepted into, falling back to the configured directory.
         let directory = entry
             .directory
             .clone()
@@ -689,10 +622,8 @@ fn upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str, Vec<u8>
         (directory, file.name.clone(), file.size)
     };
 
-    // The body has to be the size that was offered and accepted. Anything else means the request
-    // was framed in a way this server misread, and writing it anyway is how a truncated -- or
-    // empty -- file ends up on disk looking like a completed transfer. A sender that offered no
-    // size gets the benefit of the doubt, since there is nothing to check against.
+    // Refuse a body that is not the size accepted: a misread framing otherwise lands as a truncated
+    // file that looks complete.
     if offered > 0 && request.body.len() as u64 != offered {
         return (
             "400 Bad Request",
@@ -737,11 +668,8 @@ fn upload(request: &Request, receiver: &Arc<Receiver>) -> (&'static str, Vec<u8>
     ("200 OK", json_body(json!({})))
 }
 
-/// A safe destination inside the download directory.
-///
-/// The name comes from the sender, so it is reduced to its final component: a name like
-/// `../../.ssh/authorized_keys` must not escape the download directory. Collisions get a counter
-/// rather than overwriting whatever is already there.
+/// The sender's name is reduced to its final component so `../../.ssh/authorized_keys` cannot
+/// escape the directory.
 fn unique_path(directory: &Path, name: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(directory)
         .with_context(|| format!("creating {}", directory.display()))?;
@@ -772,7 +700,6 @@ fn unique_path(directory: &Path, name: &str) -> Result<PathBuf> {
     Err(anyhow!("too many files named {cleaned}"))
 }
 
-/// Answer other devices' announcements so this machine is discoverable.
 fn respond_to_announcements(receiver: Arc<Receiver>) -> Result<()> {
     let socket = super::multicast_socket()?;
     let mut buffer = [0u8; 8192];
@@ -799,12 +726,9 @@ fn respond_to_announcements(receiver: Arc<Receiver>) -> Result<()> {
         if their_fingerprint == Some(receiver.fingerprint().as_str()) {
             continue;
         }
-        // Record every device heard from, announcement or reply alike -- this is the socket that
-        // is always listening, so it is what makes discovery reliable.
         if let Some(device) = super::parse_announcement(&buffer[..read], from) {
             receiver.remember(device);
         }
-        // Only answer devices that asked for answers.
         if payload.get("announce").and_then(Value::as_bool) != Some(true) {
             continue;
         }
@@ -823,7 +747,6 @@ mod tests {
 
     #[test]
     fn a_sender_cannot_escape_the_download_directory() {
-        // The file name is attacker-controlled; a traversal must land inside the directory.
         let dir = tempdir().unwrap();
         let path = unique_path(dir.path(), "../../.ssh/authorized_keys").unwrap();
         assert_eq!(path.parent().unwrap(), dir.path());
@@ -859,9 +782,6 @@ mod tests {
         }
     }
 
-    /// One canned request, handed over in `per_read`-sized pieces, with whatever the server
-    /// writes back kept for inspection. Real requests arrive split across reads, and a body
-    /// reader that only works when everything lands in one go is the bug this guards.
     struct Wire {
         incoming: Vec<u8>,
         outgoing: Vec<u8>,
@@ -911,7 +831,6 @@ mod tests {
 
     #[test]
     fn a_body_longer_than_content_length_is_truncated() {
-        // Never write more than the sender declared.
         let raw = b"POST /x HTTP/1.1\r\nContent-Length: 2\r\n\r\nhello";
         let request = read_request(&mut Wire::new(raw, 8192)).unwrap();
         assert_eq!(request.body, b"he");
@@ -919,8 +838,7 @@ mod tests {
 
     #[test]
     fn a_chunked_upload_is_reassembled() {
-        // LocalSend streams file uploads, so they carry no Content-Length at all. Reading only
-        // Content-Length made every one of these an empty body -- and an empty file on disk.
+        // LocalSend streams uploads with no Content-Length.
         let raw = b"POST /api/localsend/v2/upload?sessionId=a&fileId=0&token=t HTTP/1.1\r\n                    Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         let request = read_request(&mut Wire::new(raw, 8192)).unwrap();
         assert_eq!(request.body, b"hello world");
@@ -928,7 +846,6 @@ mod tests {
 
     #[test]
     fn a_chunked_upload_split_across_reads_is_reassembled() {
-        // A byte at a time is the worst case: every size line and every chunk straddles a read.
         let raw = b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
         for per_read in [1, 2, 7, 8192] {
             let request = read_request(&mut Wire::new(raw, per_read)).unwrap();
@@ -945,10 +862,8 @@ mod tests {
 
     #[test]
     fn a_sender_that_asks_before_uploading_is_told_to_go_ahead() {
-        // curl sends this for any sizeable body and will not start until it is answered.
         let raw = b"POST /x HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello";
         let mut wire = Wire::new(raw, 8192);
-        // The head has to arrive on its own, the way it does when the sender is waiting.
         let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
         wire.per_read = split;
         let request = read_request(&mut wire).unwrap();
@@ -958,7 +873,6 @@ mod tests {
 
     #[test]
     fn a_request_with_no_body_framing_has_no_body() {
-        // `/info` and the discovery fallback send neither header, and must not hang waiting.
         let raw = b"GET /api/localsend/v2/info HTTP/1.1\r\nHost: x\r\n\r\n";
         assert!(read_request(&mut Wire::new(raw, 8192))
             .unwrap()
@@ -972,7 +886,6 @@ mod tests {
         assert!(read_request(&mut Wire::new(raw, 8192)).is_err());
     }
 
-    /// A receiver holding one accepted transfer, ready for `upload` to be called against it.
     fn accepted(directory: &Path, size: u64) -> Arc<Receiver> {
         let file = IncomingFile {
             id: "0".to_string(),
@@ -1039,8 +952,6 @@ mod tests {
 
     #[test]
     fn a_body_that_does_not_match_what_was_offered_is_refused() {
-        // The symptom this backstops: a body the server misread arriving as nothing, and being
-        // written out as a zero-byte file that looks like a completed transfer.
         let dir = tempdir().unwrap();
         let receiver = accepted(dir.path(), 5);
         let (status, _) = upload(&upload_request(b""), &receiver);
@@ -1051,7 +962,6 @@ mod tests {
 
     #[test]
     fn a_sender_that_offered_no_size_is_taken_at_its_word() {
-        // Nothing to check against, so the bytes are written rather than refused.
         let dir = tempdir().unwrap();
         let receiver = accepted(dir.path(), 0);
         let (status, _) = upload(&upload_request(b"hello"), &receiver);

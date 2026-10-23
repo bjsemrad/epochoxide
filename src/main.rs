@@ -109,8 +109,6 @@ enum ServiceAction {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref())?;
-    // Capture settings are read by both the daemon and the one-shot `api` command, which answers
-    // in-process when no daemon is running, so they are installed before either path runs.
     capture::configure(&config);
     nix::configure(&config);
     hardware::configure(&config);
@@ -121,16 +119,8 @@ fn main() -> Result<()> {
         Command::Serve { socket } => {
             let socket = socket.unwrap_or_else(|| config.socket.clone());
             let config_path = Config::resolved_path(cli.config.as_deref());
-            // Accepting transfers means binding a port and answering discovery, so a failure here
-            // is reported and stepped over rather than stopping the daemon: everything else still
-            // works without it.
             localsend::configure(&config);
-            // Checking for flake updates is a background job with a timer, so it only runs under
-            // the daemon; the one-shot CLI answers from whatever the daemon last found.
             nix::watch();
-            // Put back the wallpaper chosen last session, before anything draws. hyprpaper starts
-            // from its own config and knows nothing about the choice, so without this a reboot
-            // silently reverts it. (When the shell draws, it asks for the choice itself.) Daemon-only: a one-shot CLI call should not repaint the desktop.
             wallpaper::restore();
             wallpaper::defer_restarts();
             if config.localsend_receive {
@@ -207,10 +197,6 @@ fn main() -> Result<()> {
         } => {
             let params: serde_json::Value = serde_json::from_str(&params)
                 .map_err(|err| anyhow::anyhow!("--params must be JSON: {err}"))?;
-            // Prefer the warm daemon; fall back to answering in-process so the CLI still works
-            // with no daemon running.
-            // A streaming method never returns; print each payload as it arrives. It needs a
-            // daemon -- there is nothing to hold the stream open in a one-shot CLI process.
             if api::is_streaming(&method) {
                 match client::api_stream(&config.socket, &method, &params) {
                     Ok(payloads) => {
@@ -248,17 +234,14 @@ fn main() -> Result<()> {
                         .get("data")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
-                    // A daemon predating the API rejects the request as unparseable rather than
-                    // answering with a structured error, so its reply carries no `code`. That is
-                    // version skew, not a real failure: answer in-process rather than reporting
-                    // the daemon's parse error to the user.
+                    // A daemon predating the API cannot parse the request and returns no `code`:
+                    // version skew, so answer in-process.
                     if !ok && data.get("code").is_none() {
                         local()
                     } else {
                         (ok, data)
                     }
                 }
-                // No daemon at all: answer in-process so the CLI works on a cold machine.
                 None => local(),
             };
             if ok {

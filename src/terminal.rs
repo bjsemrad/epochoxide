@@ -1,32 +1,13 @@
-//! Running a command where the user can watch it.
-//!
-//! Some actions cannot be done quietly in the background: a rebuild takes minutes and prints the
-//! only record of what it did, a firmware update asks for a password and then asks the user to
-//! reboot. Those belong in a terminal the user can see, read, and interrupt.
-//!
-//! Two details make the difference between this working and looking broken:
-//!
-//! 1. **The user's own shell, interactively.** A command worth putting on a button is usually one
-//!    the user already runs by hand -- `nixswitch`, `rebuild-thor` -- and those are shell aliases,
-//!    which live in an rc file that `sh -c` never reads.
-//! 2. **The terminal stays open.** A window that closes on the last line takes the output with it,
-//!    which is the one thing the user opened a terminal for.
-//! 3. **The terminal is not ours.** Spawned as a plain child it lands in this service's cgroup, and
-//!    a rebuild -- the very thing these terminals run -- restarts the service when it changes, and
-//!    systemd stops everything in the cgroup with it: the terminal was killed mid-rebuild. So it
-//!    goes in a scope of its own (`systemd-run --user --scope`), as the compositor's launches do.
+//! Commands run in the user's interactive shell (their aliases live in rc files `sh -c` never
+//! reads), the terminal stays open after, and it runs in its own systemd scope: as a child of this
+//! service a rebuild restarting the service killed it.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Terminals to try when none is configured, in the order they are looked for. Every one of these
-/// takes the command to run after `-e`.
 const TERMINALS: &[&str] = &["ghostty", "kitty", "alacritty", "foot", "wezterm", "xterm"];
 
-/// Run `command` in a terminal, optionally from `directory`.
-///
-/// Returns the command as it was given, so a caller can report what it started.
 pub fn run(command: &str, directory: Option<&Path>, terminal: &str) -> Result<String> {
     if command.trim().is_empty() {
         bail!("nothing to run");
@@ -53,8 +34,6 @@ pub fn run(command: &str, directory: Option<&Path>, terminal: &str) -> Result<St
     let line = format!("{terminal} {shell} -i -c {}", quote(&script));
     let mut child = match scoped(&line).spawn() {
         Ok(child) => child,
-        // No systemd-run (no systemd user session): a plain child, which works until the service
-        // restarts.
         Err(_) => detached(Command::new("sh").arg("-c").arg(&line))
             .spawn()
             .with_context(|| format!("running {terminal}"))?,
@@ -66,7 +45,6 @@ pub fn run(command: &str, directory: Option<&Path>, terminal: &str) -> Result<St
     Ok(command.to_string())
 }
 
-/// `line` in a transient scope of its own, outside this service's cgroup.
 fn scoped(line: &str) -> Command {
     let mut command = Command::new("systemd-run");
     command.args([
@@ -98,14 +76,13 @@ fn default_terminal() -> Option<String> {
         .map(|candidate| format!("{candidate} -e"))
 }
 
-/// The user's login shell, which is where their aliases are defined.
 fn user_shell() -> String {
     if let Ok(shell) = std::env::var("SHELL") {
         if !shell.trim().is_empty() {
             return shell;
         }
     }
-    // A systemd user service does not always inherit SHELL, so passwd is the fallback.
+    // A systemd user service does not always inherit SHELL.
     let user = std::env::var("USER").unwrap_or_default();
     if !user.is_empty() {
         if let Some(line) = Command::new("getent")

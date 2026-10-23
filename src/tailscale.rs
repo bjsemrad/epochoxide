@@ -1,9 +1,3 @@
-//! Normalized Tailscale state.
-//!
-//! `tailscale status --json` is a large, version-dependent payload; only the fields the shell and
-//! CLI actually render are lifted out of it, so a Tailscale upgrade that adds or moves keys does
-//! not ripple into the UI.
-
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,34 +6,25 @@ use std::{path::Path, process::Command};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Machine {
     pub id: String,
-    /// Short host name, e.g. `thor`.
     pub name: String,
-    /// Fully-qualified MagicDNS name, trailing dot stripped.
     pub dns_name: String,
     pub os: String,
     pub online: bool,
     pub ips: Vec<String>,
-    /// True when this machine is the exit node currently in use.
     pub exit_node: bool,
-    /// True when this machine offers itself as an exit node.
     pub exit_node_option: bool,
-    /// True for this device itself rather than a peer.
     pub is_self: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Status {
-    /// True only when the backend is fully up.
     pub running: bool,
-    /// Raw backend state, e.g. `Running`, `Stopped`, `NeedsLogin`.
     pub state: String,
     pub version: String,
     pub tailnet: String,
     pub magic_dns_suffix: String,
     pub self_machine: Option<Machine>,
-    /// Name of the exit node in use, if any.
     pub exit_node: Option<String>,
-    /// Health warnings Tailscale is reporting, empty when healthy.
     pub health: Vec<String>,
 }
 
@@ -64,8 +49,6 @@ struct LocalWaitingFile {
     size: i64,
 }
 
-/// Whether the Tailscale CLI is installed at all. Used to decide the API group's availability
-/// rather than failing every call.
 pub fn available() -> bool {
     which("tailscale").is_some()
 }
@@ -77,7 +60,6 @@ fn which(binary: &str) -> Option<std::path::PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// `tailscale status --json`, parsed.
 fn status_json() -> Result<Value> {
     if !available() {
         bail!("tailscale is not installed");
@@ -120,8 +102,7 @@ fn string(value: &Value, key: &str) -> String {
 }
 
 fn machine(node: &Value, is_self: bool, backend_running: bool) -> Machine {
-    // Peers report their addresses under TailscaleIPs on current releases and Addrs on older
-    // ones; take whichever is present so both keep working.
+    // Peers report addresses under TailscaleIPs on current releases and Addrs on older ones.
     let ips = ["TailscaleIPs", "Addrs"]
         .iter()
         .find_map(|key| node.get(*key).and_then(Value::as_array))
@@ -138,10 +119,8 @@ fn machine(node: &Value, is_self: bool, backend_running: bool) -> Machine {
         name: string(node, "HostName"),
         dns_name: string(node, "DNSName").trim_end_matches('.').to_string(),
         os: string(node, "OS"),
-        // A peer's Online is control-plane visibility, which is what a UI wants. For this
-        // device it is not: Tailscale reports Self.Online false whenever it cannot reach the
-        // coordination server, even with the tailnet up and BackendState Running, so showing the
-        // local machine as offline would contradict the status right next to it.
+        // Self.Online is false whenever the coordination server is unreachable, even with the
+        // tailnet up, so this device's own state is used instead.
         online: if is_self {
             backend_running
         } else {
@@ -200,7 +179,6 @@ pub fn status() -> Result<Status> {
     })
 }
 
-/// Every machine in the tailnet, this device first, then peers by name.
 pub fn machines() -> Result<Vec<Machine>> {
     let raw = status_json()?;
     let running = string(&raw, "BackendState") == "Running";
@@ -348,10 +326,6 @@ pub fn receive(directory: &str) -> Result<ReceiveResult> {
     Ok(result)
 }
 
-/// Send files to a peer with Taildrop.
-///
-/// The peer is named the way `machines` reports it -- short name or MagicDNS name -- and is
-/// resolved here so callers never have to build a `tailscale file cp` target themselves.
 pub fn send(peer: &str, files: &[String]) -> Result<()> {
     if files.is_empty() {
         bail!("no files given");

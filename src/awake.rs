@@ -1,16 +1,3 @@
-//! Stay awake: hold the machine out of idle and sleep until told otherwise.
-//!
-//! The inhibitor is a `systemd-inhibit` process the daemon holds open, which is what makes this
-//! state rather than an action: it survives the command that started it, a shell reload, and a
-//! keybinding pressed twice. Releasing it is killing that process, and nothing else can leave the
-//! machine stuck awake -- if the daemon dies, the lock dies with it.
-//!
-//! logind is the right place to take the lock because everything that idles the session already
-//! watches it: hypridle honours logind idle inhibitors unless it is configured not to, and
-//! systemd's own suspend honours them regardless. The shell additionally raises a Wayland
-//! idle-inhibit against its own surface, so a compositor-level idle never even starts -- but that
-//! belongs to the shell, which has a surface, rather than here.
-
 use crate::notify;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -18,8 +5,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// What the inhibitor blocks. `idle` stops idle timers -- the lock, the screen blank -- and
-/// `sleep` stops the automatic suspend that would otherwise land in the middle of a long download.
 const WHAT: &str = "idle:sleep";
 const WHO: &str = "EpochShell";
 const DEFAULT_REASON: &str = "Stay awake";
@@ -27,9 +12,7 @@ const DEFAULT_REASON: &str = "Stay awake";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct StayAwake {
     pub enabled: bool,
-    /// Why the machine is being held awake, as it appears in `systemd-inhibit --list`.
     pub reason: String,
-    /// When it was turned on, and how long ago that was. Zero when it is off.
     pub since: i64,
     pub seconds: u64,
     pub available: bool,
@@ -60,11 +43,6 @@ fn held() -> Result<std::sync::MutexGuard<'static, Option<Inhibitor>>> {
         .map_err(|_| anyhow!("the stay-awake lock is poisoned"))
 }
 
-/// Whether the machine is being held awake.
-///
-/// An inhibitor whose process has died -- logind restarted, something killed it -- is noticed here
-/// and cleared, because a bar indicator that keeps claiming the machine is awake when the lock is
-/// gone is worse than no indicator.
 pub fn status() -> StayAwake {
     let availability = available();
     let mut slot = match held() {
@@ -95,10 +73,6 @@ pub fn status() -> StayAwake {
     }
 }
 
-/// Turn stay-awake on or off. `enabled` of `None` toggles.
-///
-/// Setting it to what it already is does nothing rather than replacing the lock: a keybinding
-/// pressed twice should not restart the clock or fire a second notification.
 pub fn set(enabled: Option<bool>, reason: Option<&str>, notify_user: bool) -> Result<StayAwake> {
     if let Err(unavailable) = available() {
         bail!("{unavailable}");
@@ -115,8 +89,7 @@ pub fn set(enabled: Option<bool>, reason: Option<&str>, notify_user: bool) -> Re
             .filter(|reason| !reason.is_empty())
             .unwrap_or(DEFAULT_REASON)
             .to_string();
-        // `sleep infinity` is the process being inhibited: systemd-inhibit holds the lock for as
-        // long as its child runs, so the child is chosen to do nothing at all.
+        // systemd-inhibit holds the lock for as long as its child runs, so the child does nothing.
         let child = Command::new("systemd-inhibit")
             .arg(format!("--what={WHAT}"))
             .arg(format!("--who={WHO}"))
@@ -135,7 +108,6 @@ pub fn set(enabled: Option<bool>, reason: Option<&str>, notify_user: bool) -> Re
             at: now(),
         });
     } else if let Some(mut inhibitor) = held()?.take() {
-        // Killing the process is what releases the lock; logind drops it when the holder exits.
         let _ = inhibitor.child.kill();
         let _ = inhibitor.child.wait();
     }
@@ -175,7 +147,6 @@ mod tests {
 
     #[test]
     fn nothing_is_held_until_something_asks() {
-        // The empty state is what a bar indicator reads before anyone has touched the toggle.
         let idle = StayAwake::default();
         assert!(!idle.enabled);
         assert_eq!(idle.seconds, 0);
@@ -184,15 +155,7 @@ mod tests {
 
     #[test]
     fn the_inhibitor_blocks_both_idling_and_sleeping() {
-        // Holding only `idle` would still let the automatic suspend land in the middle of a long
-        // download, which is the thing this feature exists to prevent.
         assert!(WHAT.contains("idle"));
         assert!(WHAT.contains("sleep"));
     }
-
-    // Turning it on and off is deliberately not a unit test. It would spawn a real inhibitor
-    // against the machine running the suite, and two such tests share this module's one global
-    // lock: cargo runs them in parallel, they race over it, and a failure leaves the developer's
-    // laptop held awake by an orphaned `sleep infinity`. Both of those happened while this module
-    // was being written. That path is exercised through `epochctl toggle stay-awake` instead.
 }

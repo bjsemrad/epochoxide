@@ -13,9 +13,6 @@ pub fn score(query: &str, candidate: &str, exact: bool, field: &str) -> Option<(
     )
 }
 
-/// Like `score`, but assumes `query`/`candidate` are already lowercase. Callers whose search
-/// fields are pre-lowercased at index time (files/apps/runner) should call this directly and
-/// lowercase `query` once per query rather than once per candidate via `score`.
 pub fn score_lower(
     query: &str,
     candidate: &str,

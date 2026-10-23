@@ -1,37 +1,3 @@
-//! The desktop wallpaper: what is on it, what could be, and switching between them.
-//!
-//! This lives in the daemon rather than the shell for the same reason night mode and stay-awake
-//! do: it is system state, and it has to be answerable and settable with the shell closed. It also
-//! has to be restored before anything else draws, which only something started at session time can
-//! do.
-//!
-//! Two things can draw it, chosen by `wallpaper_backend`:
-//!
-//!   * The shell itself, on a background layer surface. Nothing is applied here at all: a switch is
-//!     remembered and announced over `wallpaper.subscribe`, and the shell draws whatever was
-//!     announced. This works the same under every compositor and switches with no restart.
-//!   * hyprpaper. Under Hyprland, applied through `hyprctl hyprpaper wallpaper ",<path>"`, which
-//!     hyprpaper 0.8 switches on with no reload. Anywhere else -- niri -- hyprpaper still draws, but
-//!     it turns its IPC off at startup ("not running under hyprland, IPC will be disabled"), so
-//!     nothing can switch it live. There the switch goes through hyprpaper's config instead: when
-//!     that config points at a symlink, the link is repointed and hyprpaper restarted to read it
-//!     again.
-//!
-//! "auto", the default, uses hyprpaper when it is running and the shell otherwise -- so moving to
-//! the shell is a matter of no longer starting hyprpaper. See `Backend`.
-//!
-//! Two things about hyprpaper shape the rest of this file, whichever backend is in use:
-//!
-//!   * Its `listactive` reports what was loaded at startup and does not follow a live switch, so it
-//!     cannot answer "what is set now". This module remembers instead.
-//!   * Its config lives wherever the session manager put it -- on a home-manager machine a
-//!     read-only symlink into the nix store -- so the choice cannot be written back there. It goes
-//!     in the daemon's own state file.
-//!
-//! Paths are used exactly as found rather than canonicalised. hyprpaper matches on the path it was
-//! given, and a wallpaper directory full of symlinks into the store resolves to paths it will not
-//! recognise.
-
 use crate::config::Config;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -42,52 +8,36 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-/// Extensions worth offering. Deliberately short: these are things hyprpaper can actually load.
 const EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
-/// How deep a wallpaper directory is searched. One level of subdirectory is enough to let someone
-/// keep `wallpapers/nature` and `wallpapers/abstract` without turning this into a filesystem crawl.
 const MAX_DEPTH: usize = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Wallpaper {
-    /// Every image found, sorted, so a picker's tile positions stay put between openings.
     pub wallpapers: Vec<String>,
-    /// What is on screen, as far as this daemon knows -- which is the only thing that does.
     pub current: String,
     pub directories: Vec<String>,
     pub fit_mode: String,
-    /// What is drawing it: "shell" or "hyprpaper", or empty when neither can be used here. The
-    /// shell draws only when this says "shell", so it never paints over a running hyprpaper.
     pub backend: String,
     pub available: bool,
     pub unavailable_reason: Option<String>,
 }
 
-/// The current wallpaper, remembered because nothing else can be asked.
 static CURRENT: Mutex<Option<String>> = Mutex::new(None);
 
-/// Installed once at startup, the way night mode's temperature is: `dispatch` has no registry to
-/// read a config out of, so the settings this module needs are put somewhere it can reach.
 static DIRECTORIES: OnceLock<Vec<String>> = OnceLock::new();
 static FIT_MODE: OnceLock<String> = OnceLock::new();
 static BACKEND: OnceLock<String> = OnceLock::new();
 
-/// Values `wallpaper_backend` accepts.
 const BACKENDS: &[&str] = &["auto", "shell", "hyprpaper"];
 
-/// Fit modes the shell draws. Qt has a fill mode for each, stretch included, so none of
-/// hyprpaper's caveats below apply when the shell is drawing.
 const SHELL_FIT_MODES: &[&str] = &["cover", "contain", "tile", "stretch"];
 
-/// Fit modes that reach the screen as themselves. Everything else hyprpaper renders as "cover"
-/// without saying so, which makes a wrong value indistinguishable from the setting having no
-/// effect -- worth one line at startup rather than an afternoon with a screenshot and a hash.
+/// Everything else hyprpaper silently renders as cover.
 const FIT_MODES: &[&str] = &["cover", "contain", "tile"];
 
-/// Modes hyprctl accepts and hyprpaper 0.8.4 then quietly turns into "cover". They are worth
-/// naming separately: `fit_mode = fill` in a hyprpaper.conf really does stretch, so the reasonable
-/// assumption is that a switch can be made to match it, and it cannot.
+/// Accepted by hyprctl but rendered as cover by hyprpaper 0.8.4, though `fit_mode = fill` in
+/// hyprpaper.conf does stretch.
 const FIT_MODES_LOST: &[&str] = &["stretch", "fit", "fill"];
 
 pub fn configure(config: &Config) {
@@ -99,8 +49,6 @@ pub fn configure(config: &Config) {
         backend = "auto".into();
     }
 
-    // Warned about once, for the backend that will actually see the value. The shell's list is a
-    // superset of hyprpaper's, so "shell" only complains about a word nothing understands.
     let wanted = config.wallpaper_fit_mode.clone();
     if !SHELL_FIT_MODES.contains(&wanted.as_str()) {
         eprintln!("wallpaper: {wanted:?}: not a fit mode, it will render as \"cover\"");
@@ -151,18 +99,14 @@ fn remembered() -> Option<String> {
     Some(saved.to_string())
 }
 
-/// What is on screen. The state file comes first: it is what a one-shot CLI call writes, so a
-/// `epochctl wallpaper set` that ran with no daemon is still the truth once the daemon is back.
-/// Memory only answers when the file cannot be read -- no state directory, say -- so a switch
-/// still holds for the life of the process.
 fn current() -> String {
     remembered()
         .or_else(|| CURRENT.lock().unwrap().clone())
         .unwrap_or_default()
 }
 
-/// Write the choice down, atomically: `wallpaper.subscribe` watches this file, and a plain write
-/// truncates before it writes, which a watcher would read as the wallpaper being unset.
+/// Atomic: `wallpaper.subscribe` watches this file, and a truncating write reads as the wallpaper
+/// being unset.
 fn remember(path: &str) {
     let Some(target) = state_path() else { return };
     if let Some(parent) = target.parent() {
@@ -174,8 +118,7 @@ fn remember(path: &str) {
     }
 }
 
-/// Walk one directory for images, following symlinks: a home-manager wallpaper directory is
-/// entirely links into the nix store, and a scan that does not follow them finds nothing.
+/// Follows symlinks: a home-manager wallpaper directory is all links into the store.
 fn scan_dir(dir: &Path, depth: usize, found: &mut Vec<String>) {
     if depth > MAX_DEPTH {
         return;
@@ -185,7 +128,6 @@ fn scan_dir(dir: &Path, depth: usize, found: &mut Vec<String>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        // metadata() follows symlinks where symlink_metadata() would not.
         let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
@@ -212,35 +154,24 @@ fn scan() -> Vec<String> {
     found
 }
 
-/// The unit hyprpaper runs as. Restarting it is how a switch lands when its IPC is off.
 const HYPRPAPER_UNIT: &str = "hyprpaper.service";
 
-/// How long switching has to go quiet before hyprpaper is restarted. Clicking through the picker
-/// otherwise restarts it once per click, each one a flicker -- and enough of them inside systemd's
-/// start limit (5 in 10s) leaves the unit failed and the desktop with no wallpaper at all.
+/// Restarts wait for clicking to settle: one per click flickers, and 5 in 10s trips systemd's start
+/// limit, leaving no wallpaper.
 const RESTART_SETTLE: Duration = Duration::from_millis(500);
 
-/// Whether restarts may be deferred. Only the daemon lives long enough to do one later; a one-shot
-/// CLI call that deferred would exit first and never restart anything.
+/// Only the daemon lives long enough to restart later; a one-shot CLI call would exit first.
 static DEFER_RESTARTS: AtomicBool = AtomicBool::new(false);
 
-/// Bumped by every switch. A deferred restart only goes ahead if no switch came after it.
 static RESTART_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Called by the daemon at startup: from here on, restarts wait for switching to settle.
 pub fn defer_restarts() {
     DEFER_RESTARTS.store(true, Ordering::SeqCst);
 }
 
-/// How a switch reaches the screen. Decided per call rather than once at startup, because the
-/// daemon outlives a logout and the next session may be the other compositor -- or may not have
-/// started hyprpaper at all.
 enum Backend {
-    /// The shell draws it. Nothing to apply; the switch is announced and the shell follows.
     Shell,
-    /// Hyprland is running, so hyprpaper's IPC is up and a switch is instant.
     Ipc,
-    /// hyprpaper's IPC is off, but its config draws from this symlink: repoint it and restart.
     Link(PathBuf),
 }
 
@@ -248,9 +179,8 @@ fn hyprpaper_config() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("hypr/hyprpaper.conf"))
 }
 
-/// The image path hyprpaper.conf names, from either dialect: 0.8's `wallpaper { path = ... }`
-/// block, or the older one-line `wallpaper = monitor,path`. The first one wins -- a config with a
-/// wallpaper per monitor cannot be switched as a whole through one link anyway.
+/// Reads both hyprpaper.conf dialects: 0.8's `wallpaper { path = ... }` and the older `wallpaper =
+/// monitor,path`.
 fn configured_path(conf: &str) -> Option<String> {
     for line in conf.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -263,7 +193,6 @@ fn configured_path(conf: &str) -> Option<String> {
             "wallpaper" => value.split_once(',').map(|(_, p)| p.trim()).unwrap_or(""),
             _ => continue,
         };
-        // Old-style values may carry a fit mode as a prefix: `contain:/path`.
         let path = path.rsplit_once(':').map(|(_, p)| p).unwrap_or(path);
         if !path.is_empty() {
             return Some(shellexpand::tilde(path).into_owned());
@@ -272,8 +201,6 @@ fn configured_path(conf: &str) -> Option<String> {
     None
 }
 
-/// The symlink hyprpaper.conf draws from, if it draws from one. A plain file cannot be used: the
-/// image itself would have to be overwritten, and that is the user's picture, not this daemon's.
 fn config_link() -> Result<PathBuf, String> {
     let conf = hyprpaper_config().ok_or("no config directory")?;
     let text = std::fs::read_to_string(&conf).map_err(|_| {
@@ -299,15 +226,12 @@ fn backend() -> Result<Backend, String> {
     match backend_setting().as_str() {
         "shell" => Ok(Backend::Shell),
         "hyprpaper" => hyprpaper_backend(),
-        // Whichever is actually here. hyprpaper running means someone wants it drawing, and the
-        // shell painting a second wallpaper under it would only waste memory.
         _ if hyprpaper_running() => hyprpaper_backend(),
         _ => Ok(Backend::Shell),
     }
 }
 
-/// Whether a hyprpaper process exists, however it was started: a Hyprland `exec-once` is as
-/// common as the systemd unit, so asking systemd alone would miss half of them.
+/// Any hyprpaper process, not just the unit: Hyprland `exec-once` is as common.
 fn hyprpaper_running() -> bool {
     let Ok(procs) = std::fs::read_dir("/proc") else {
         return false;
@@ -332,27 +256,15 @@ fn hyprpaper_backend() -> Result<Backend, String> {
                 .into(),
         );
     }
-    // The shell is the easy way out of every refusal below, so say so.
     config_link()
         .map(Backend::Link)
         .map_err(|why| format!("{why} (or set wallpaper_backend = \"shell\" and stop hyprpaper)"))
 }
 
-/// Why this group might not work here. A machine where it cannot still be asked what images
-/// exist, which is why `wallpaper.status` answers regardless.
 pub fn available() -> Result<(), String> {
     backend().map(|_| ())
 }
 
-/// Ask hyprpaper to switch.
-///
-/// The request is `monitor,path,fit_mode` -- three comma-separated fields. An empty monitor means
-/// every output. The fit mode has to travel with the switch: hyprpaper's config carries one per
-/// declared wallpaper, so an image set over IPC inherits nothing and would be fitted by whatever
-/// the default happens to be.
-///
-/// Worth knowing if this ever looks wrong: the mode is NOT a prefix on the path. `contain:/foo.jpg`
-/// is rejected as a bad path, which is an easy thing to reach for and an easy error to misread.
 fn apply(path: &str) -> Result<()> {
     match backend().map_err(anyhow::Error::msg)? {
         Backend::Shell => Ok(()),
@@ -369,7 +281,7 @@ fn apply_ipc(path: &str) -> Result<()> {
         .args(["hyprpaper", "wallpaper", &format!(",{path},{}", fit_mode())])
         .output()?;
 
-    // hyprctl exits 0 and says nothing on success; anything on stdout is the failure.
+    // hyprctl exits 0 and prints nothing on success; anything on stdout is the failure.
     let said = String::from_utf8_lossy(&output.stdout);
     let said = said.trim();
     if !said.is_empty() {
@@ -378,8 +290,7 @@ fn apply_ipc(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Point `link` at `target`, atomically: a new link beside it renamed over the old one, so a
-/// hyprpaper starting at the wrong moment never finds the path missing.
+/// Atomic: a new link renamed over the old, so hyprpaper never finds the path missing.
 fn relink(link: &Path, target: &str) -> Result<()> {
     let name = link
         .file_name()
@@ -392,9 +303,7 @@ fn relink(link: &Path, target: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether the unit is one a restart should touch. "failed" counts: that is exactly the state a
-/// run of restarts leaves behind, and restarting is what gets it out. Only "inactive" -- nobody
-/// started it this session -- is left alone.
+/// "failed" counts: it is what a run of restarts leaves behind. Only "inactive" is left alone.
 fn unit_running() -> bool {
     let state = Command::new("systemctl")
         .args([
@@ -414,8 +323,6 @@ fn unit_running() -> bool {
     )
 }
 
-/// Restart hyprpaper once switching settles, or straight away when nothing will be around later.
-/// Whether the unit is running is checked now, so that refusal still reaches the caller.
 fn schedule_restart() -> Result<()> {
     if !unit_running() {
         bail!("{HYPRPAPER_UNIT} is not running; the wallpaper will show when it starts");
@@ -436,12 +343,6 @@ fn schedule_restart() -> Result<()> {
     Ok(())
 }
 
-/// Make hyprpaper read its config again. Only the systemd unit is restarted: a hyprpaper started
-/// some other way is not this daemon's to kill, and one it respawned itself would die with the
-/// daemon's cgroup.
-///
-/// `reset-failed` first clears systemd's start-rate counter, so steady switching -- each one past
-/// the settle time -- cannot add up to a unit systemd refuses to start again.
 fn restart_hyprpaper() -> Result<()> {
     let _ = Command::new("systemctl")
         .args(["--user", "reset-failed", HYPRPAPER_UNIT])
@@ -477,16 +378,10 @@ pub fn status() -> Wallpaper {
     }
 }
 
-/// How often `watch` sends the status whether or not anything changed. It is the only way a
-/// stream notices a client that has gone -- a write is what fails -- and it doubles as the rescan
-/// that picks up images dropped into a wallpaper directory.
+/// The heartbeat is the only way a stream notices a client that has gone (the write fails), and
+/// doubles as a rescan.
 const WATCH_HEARTBEAT: Duration = Duration::from_secs(120);
 
-/// Stream the status: once now, again whenever the choice changes, and on the heartbeat.
-///
-/// Changes are noticed by watching the state file rather than by hooking `set`, because the file
-/// is written by more than this process: a one-shot `epochctl wallpaper set` with no daemon
-/// writes it too, and the shell drawing the wallpaper has to follow that just the same.
 pub fn watch(mut emit: impl FnMut(&Wallpaper) -> Result<()>) -> Result<()> {
     use notify::Watcher;
 
@@ -500,8 +395,8 @@ pub fn watch(mut emit: impl FnMut(&Wallpaper) -> Result<()>) -> Result<()> {
 
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(tx)?;
-    // The directory, not the file: `remember` renames a new file over the old one, which a watch
-    // on the file itself would lose track of after the first switch.
+    // The directory, not the file: `remember` renames over the file, which a file watch loses track
+    // of.
     watcher.watch(dir, notify::RecursiveMode::NonRecursive)?;
 
     let mut last = status();
@@ -543,7 +438,6 @@ pub fn set(path: &str) -> Result<Wallpaper> {
     Ok(status())
 }
 
-/// Step through the list. `step` is signed, so -1 goes back.
 pub fn step(step: i64) -> Result<Wallpaper> {
     let list = scan();
     if list.is_empty() {
@@ -552,29 +446,19 @@ pub fn step(step: i64) -> Result<Wallpaper> {
 
     let at = list.iter().position(|p| *p == current()).unwrap_or(0) as i64;
     let len = list.len() as i64;
-    // rem_euclid so a negative step wraps to the end rather than panicking on a negative index.
     let to = (at + step).rem_euclid(len) as usize;
 
     set(&list[to])
 }
 
-/// Put back whatever was chosen last session. Called once at startup: hyprpaper starts from its own
-/// config and knows nothing about the choice, so without this every reboot silently reverts it.
-///
-/// Quiet about everything. A missing state file is the ordinary case on a fresh install, and an
-/// image that has since been deleted is not worth refusing to start over.
 pub fn restore() {
     let Some(saved) = remembered() else { return };
     if !Path::new(&saved).exists() {
         return;
     }
     let restored = match backend() {
-        // The shell asks for the status when it connects, which is all the restoring it needs.
         Ok(Backend::Shell) => true,
         Ok(Backend::Ipc) => apply_ipc(&saved).is_ok(),
-        // A link already pointing at the choice needs no restart -- hyprpaper drew it at startup.
-        // Otherwise repoint it; restarting is best-effort, since hyprpaper may simply not have
-        // started yet, and then it reads the new link when it does.
         Ok(Backend::Link(link)) => {
             if std::fs::read_link(&link).is_ok_and(|t| t == Path::new(&saved)) {
                 true

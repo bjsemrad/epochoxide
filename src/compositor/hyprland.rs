@@ -1,5 +1,3 @@
-//! Hyprland, over its IPC socket with a `hyprctl` fallback.
-
 use super::ipc::{
     hypr_ipc, hypr_output, hypr_watch, hypr_window_dispatch, hypr_workspace_dispatch,
 };
@@ -9,12 +7,8 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-/// Windows that have asked for attention and not yet had it, by address without its `0x`.
-///
-/// Hyprland reports urgency only as it happens, on the event socket (`urgent>>ADDRESS`); no query
-/// answers "which windows are urgent", so the backend keeps the answer itself. A window leaves the
-/// set when it is focused or closed, or once its workspace has been on screen -- seen, which is
-/// how niri clears it too.
+/// Hyprland only reports urgency as it happens (`urgent>>ADDRESS`), so it is tracked here until the
+/// window is focused, closed, or its workspace shown.
 static URGENT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 pub struct Hyprland;
@@ -32,8 +26,6 @@ impl Compositor for Hyprland {
         let clients = json("j/clients", &["clients", "-j"])?;
         let active = json("j/activewindow", &["activewindow", "-j"])
             .and_then(|value| string(&value, "address"));
-        // A window's monitor comes back as an index into the monitor list, so the names have to be
-        // fetched to keep the normalized shape backend-neutral.
         let monitor_names: Vec<String> = self
             .monitors()
             .unwrap_or_default()
@@ -51,7 +43,6 @@ impl Compositor for Hyprland {
 
     fn workspaces(&self) -> Option<Vec<Workspace>> {
         let workspaces = json("j/workspaces", &["workspaces", "-j"])?;
-        // "Active" is per monitor: each monitor names the workspace currently shown on it.
         let active: Vec<i64> = json("j/monitors", &["monitors", "-j"])
             .and_then(|value| {
                 Some(
@@ -158,7 +149,6 @@ impl Compositor for Hyprland {
     }
 }
 
-/// Keep track of urgency from one event-socket line. Anything else is ignored here.
 fn note_event(line: &str) {
     let Some((event, payload)) = line.split_once(">>") else {
         return;
@@ -174,7 +164,6 @@ fn apply_event(urgent: &mut HashSet<String>, event: &str, payload: &str) {
         "urgent" => {
             urgent.insert(bare_address(payload));
         }
-        // Focused: the attention has been given. `activewindowv2` carries the address alone.
         "activewindowv2" | "closewindow" => {
             urgent.remove(&bare_address(payload));
         }
@@ -182,8 +171,6 @@ fn apply_event(urgent: &mut HashSet<String>, event: &str, payload: &str) {
     }
 }
 
-/// The workspaces holding a window that wants attention, other than those on screen -- whose
-/// windows count as seen, and are let go.
 fn urgent_workspaces(active: &[i64]) -> HashSet<i64> {
     let Ok(mut guard) = URGENT.lock() else {
         return HashSet::new();
@@ -214,8 +201,6 @@ fn urgent_workspaces(active: &[i64]) -> HashSet<i64> {
     settle_urgency(urgent, &placed, active)
 }
 
-/// Given where each window is and which workspaces are on screen: drop the windows that have been
-/// seen or no longer exist, and name the workspaces the rest are on.
 fn settle_urgency(
     urgent: &mut HashSet<String>,
     placed: &[(String, i64)],
@@ -233,12 +218,11 @@ fn settle_urgency(
         .collect()
 }
 
-/// A window address as the event socket gives it: `clients` says `0x55d4...`, events `55d4...`.
+/// `clients` says `0x55d4...`, events say `55d4...`.
 fn bare_address(address: &str) -> String {
     address.trim().trim_start_matches("0x").to_string()
 }
 
-/// Prefer the IPC socket, fall back to the CLI.
 fn json(endpoint: &str, args: &[&str]) -> Option<Value> {
     let raw = hypr_ipc(endpoint).or_else(|| hypr_output(args))?;
     serde_json::from_str(&raw).ok()
@@ -248,7 +232,6 @@ fn string(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// Map one `hyprctl clients` entry onto the normalized shape.
 fn window(client: &Value, active: Option<&str>, monitor_names: &[String]) -> Window {
     let address = string(client, "address").unwrap_or_default();
     let monitor_index = client.get("monitor").and_then(Value::as_i64).unwrap_or(-1);
@@ -275,7 +258,6 @@ fn window(client: &Value, active: Option<&str>, monitor_names: &[String]) -> Win
     }
 }
 
-/// Map one `hyprctl clients` entry onto its on-screen rectangle.
 fn region(client: &Value, active: Option<&str>, monitor_names: &[String]) -> WindowRegion {
     let address = string(client, "address").unwrap_or_default();
     let monitor_index = client.get("monitor").and_then(Value::as_i64).unwrap_or(-1);
@@ -295,8 +277,6 @@ fn region(client: &Value, active: Option<&str>, monitor_names: &[String]) -> Win
     }
 }
 
-/// The workspace ids a viewer can actually see: the one each monitor is showing, plus any special
-/// workspace pulled over it.
 fn visible_workspaces(monitors: &Value) -> Vec<i64> {
     let Some(monitors) = monitors.as_array() else {
         return Vec::new();
@@ -308,7 +288,7 @@ fn visible_workspaces(monitors: &Value) -> Vec<i64> {
                 .get(key)
                 .and_then(|workspace| workspace.get("id"))
                 .and_then(Value::as_i64);
-            // A monitor with no special workspace open reports id 0, which is not a workspace.
+            // A monitor with no special workspace open reports id 0.
             if let Some(id) = id.filter(|id| *id != 0) {
                 ids.push(id);
             }
@@ -317,9 +297,6 @@ fn visible_workspaces(monitors: &Value) -> Vec<i64> {
     ids
 }
 
-/// Whether a window is on screen right now. `mapped`/`hidden` cover minimized and grouped
-/// windows; the workspace check covers the far more common case of a window sitting at real
-/// coordinates on a workspace nobody is currently looking at.
 fn on_screen(client: &Value, visible: &[i64]) -> bool {
     let mapped = client
         .get("mapped")
@@ -336,7 +313,6 @@ fn on_screen(client: &Value, visible: &[i64]) -> bool {
     mapped && !hidden && workspace.is_some_and(|id| visible.contains(&id))
 }
 
-/// Hyprland reports a window's size as `size: [width, height]`.
 fn size(client: &Value, index: usize) -> i64 {
     client
         .get("size")
@@ -346,7 +322,6 @@ fn size(client: &Value, index: usize) -> i64 {
         .unwrap_or(0)
 }
 
-/// Hyprland reports a window's position as `at: [x, y]`.
 fn at(client: &Value, index: usize) -> i64 {
     client
         .get("at")
@@ -383,7 +358,6 @@ mod tests {
 
     #[test]
     fn a_monitor_index_with_no_matching_name_is_left_empty() {
-        // A monitor unplugged between the two queries would otherwise panic or mislabel.
         let mapped = window(&client(), None, &["eDP-1".to_string()]);
         assert_eq!(mapped.monitor, "");
     }
@@ -401,7 +375,6 @@ mod tests {
 
     #[test]
     fn only_windows_on_a_visible_workspace_count_as_on_screen() {
-        // Workspace 4 holds the window; the monitors are showing 1 and 7.
         assert!(!on_screen(&client(), &[1, 7]));
         assert!(on_screen(&client(), &[1, 4]));
     }
@@ -442,7 +415,6 @@ mod tests {
         let mut urgent: HashSet<String> = ["55d4a0".to_string()].into();
         let placed = vec![("55d4a0".to_string(), 3), ("77aa10".to_string(), 1)];
         assert_eq!(settle_urgency(&mut urgent, &placed, &[1]), [3].into());
-        // Shown: seen, and let go -- leaving it again does not bring the red back.
         assert!(settle_urgency(&mut urgent, &placed, &[3]).is_empty());
         assert!(settle_urgency(&mut urgent, &placed, &[1]).is_empty());
     }

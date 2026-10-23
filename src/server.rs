@@ -42,7 +42,6 @@ enum Request {
     Api {
         method: String,
         params: Option<Value>,
-        /// Contract major the caller was built against; refused when it is not this build's.
         version: Option<u32>,
     },
 }
@@ -168,9 +167,8 @@ fn handle_client(mut stream: UnixStream, startup: Arc<Startup>) -> Result<()> {
 
     let mut lookahead = None;
     while let Some(mut request) = lookahead.take().or_else(|| rx.recv().ok()) {
-        // A burst of Query requests (fast typing outrunning processing) collapses to the
-        // newest one — the rest are dropped before doing any work. Other request kinds
-        // (Activate, Menu, ...) are never dropped and always run in order.
+        // A burst of Query requests collapses to the newest; other request kinds always run, in
+        // order.
         while matches!(request, Ok(Request::Query { .. })) {
             match rx.try_recv() {
                 Ok(next @ Ok(Request::Query { .. })) => request = next,
@@ -282,17 +280,12 @@ fn handle_client(mut stream: UnixStream, startup: Arc<Startup>) -> Result<()> {
                     error: None::<String>,
                 })?
             }
-            // API calls answer from compositor and service state, not from providers, so they
-            // are served without waiting on the registry -- a cold start still building the file
-            // index can answer compositor.windows immediately.
             Ok(Request::Api {
                 method,
                 params,
                 version,
             }) => {
                 let params = params.unwrap_or(Value::Null);
-                // A streaming method holds the connection for as long as the client wants it, so
-                // it takes over the socket instead of producing one response.
                 if crate::api::is_streaming(&method) {
                     let initial = Response {
                         ok: true,
