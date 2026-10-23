@@ -52,6 +52,7 @@ fn parse(line: &str) -> Option<Window> {
         // `wmctrl -lx` carries no geometry, so ordering falls back to the listing order.
         x: 0,
         y: 0,
+        width: 0,
     })
 }
 

@@ -25,30 +25,7 @@ impl Compositor for Niri {
             windows
                 .as_array()?
                 .iter()
-                .map(|window| {
-                    let id = window.get("id").and_then(Value::as_i64).unwrap_or(0);
-                    Window {
-                        id: format!("niri:{id}"),
-                        app_id: string(window, "app_id").unwrap_or_default(),
-                        title: string(window, "title").unwrap_or_default(),
-                        workspace: window
-                            .get("workspace_id")
-                            .and_then(Value::as_i64)
-                            .and_then(|id| names.get(&id).cloned())
-                            .unwrap_or_default(),
-                        monitor: string(window, "output").unwrap_or_default(),
-                        focused: window
-                            .get("is_focused")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                        floating: window
-                            .get("is_floating")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                        x: layout_pos(window, 0),
-                        y: layout_pos(window, 1),
-                    }
-                })
+                .map(|window| window_from(window, &names))
                 .collect(),
         )
     }
@@ -142,6 +119,33 @@ impl Compositor for Niri {
     }
 }
 
+/// One window of `niri msg --json windows`, with its workspace named through `names`.
+fn window_from(window: &Value, names: &HashMap<i64, String>) -> Window {
+    let id = window.get("id").and_then(Value::as_i64).unwrap_or(0);
+    Window {
+        id: format!("niri:{id}"),
+        app_id: string(window, "app_id").unwrap_or_default(),
+        title: string(window, "title").unwrap_or_default(),
+        workspace: window
+            .get("workspace_id")
+            .and_then(Value::as_i64)
+            .and_then(|id| names.get(&id).cloned())
+            .unwrap_or_default(),
+        monitor: string(window, "output").unwrap_or_default(),
+        focused: window
+            .get("is_focused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        floating: window
+            .get("is_floating")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        x: layout_pos(window, 0),
+        y: layout_pos(window, 1),
+        width: tile_width(window),
+    }
+}
+
 /// niri lays windows out in scrolling columns, so a window's position in that layout is its
 /// order on screen -- the equivalent of an x/y for ordering purposes.
 fn layout_pos(window: &Value, index: usize) -> i64 {
@@ -151,6 +155,18 @@ fn layout_pos(window: &Value, index: usize) -> i64 {
         .and_then(Value::as_array)
         .and_then(|pair| pair.get(index))
         .and_then(Value::as_i64)
+        .unwrap_or(0)
+}
+
+/// The tile's width in logical pixels, `layout.tile_size[0]`, rounded; 0 when niri does not say.
+fn tile_width(window: &Value) -> i64 {
+    window
+        .get("layout")
+        .and_then(|layout| layout.get("tile_size"))
+        .and_then(Value::as_array)
+        .and_then(|size| size.first())
+        .and_then(Value::as_f64)
+        .map(|width| width.round() as i64)
         .unwrap_or(0)
 }
 
@@ -216,6 +232,44 @@ mod tests {
     fn an_empty_name_is_treated_as_no_name() {
         let workspace = json!({ "id": 7, "idx": 2, "name": "" });
         assert_eq!(workspace_name(&workspace, 7), "2");
+    }
+
+    // As `niri msg --json windows` reports a tiled window, trimmed to what is read.
+    fn captured_window() -> Value {
+        json!({
+            "id": 42,
+            "title": "Claude",
+            "app_id": "brave-claude.ai__-Default",
+            "workspace_id": 9,
+            "is_focused": true,
+            "is_floating": false,
+            "layout": {
+                "pos_in_scrolling_layout": [2, 1],
+                "tile_size": [1067.5, 1388.25],
+                "window_size": [1067, 1388],
+                "tile_pos_in_workspace_view": null,
+                "window_offset_in_tile": [0.0, 0.0]
+            }
+        })
+    }
+
+    #[test]
+    fn a_window_carries_its_column_and_tile_width() {
+        let names = HashMap::from([(9, "4".to_string())]);
+        let window = window_from(&captured_window(), &names);
+        assert_eq!(window.id, "niri:42");
+        assert_eq!(window.workspace, "4");
+        assert_eq!((window.x, window.y), (2, 1));
+        assert_eq!(window.width, 1068);
+        assert!(window.focused && !window.floating);
+    }
+
+    #[test]
+    fn a_window_without_a_layout_has_an_unknown_width() {
+        let mut window = captured_window();
+        window.as_object_mut().unwrap().remove("layout");
+        let window = window_from(&window, &HashMap::new());
+        assert_eq!((window.x, window.y, window.width), (0, 0, 0));
     }
 
     #[test]

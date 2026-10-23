@@ -34,6 +34,10 @@ pub struct Window {
     /// backend that does not report geometry leaves both at zero.
     pub x: i64,
     pub y: i64,
+    /// The window's tile width in logical pixels, where the compositor reports one (niri's
+    /// `layout.tile_size`); 0 means unknown. The shell sizes a scrolling column's cell by it.
+    #[serde(default)]
+    pub width: i64,
 }
 
 /// Where a window sits on screen, in output-layout pixels.
@@ -436,6 +440,7 @@ mod tests {
             floating: false,
             x,
             y,
+            width: 0,
         }
     }
 

@@ -137,6 +137,7 @@ fn collect(node: &Value, workspace: &str, out: &mut Vec<Window>) {
                 floating: false,
                 x: rect(node, "x"),
                 y: rect(node, "y"),
+                width: 0,
             });
         }
     }

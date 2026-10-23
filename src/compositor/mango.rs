@@ -40,6 +40,7 @@ impl Compositor for Mango {
                         floating: flag(client, "is_floating"),
                         x: int(client, "x"),
                         y: int(client, "y"),
+                        width: 0,
                     }
                 })
                 .collect(),

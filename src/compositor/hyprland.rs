@@ -271,6 +271,7 @@ fn window(client: &Value, active: Option<&str>, monitor_names: &[String]) -> Win
             .unwrap_or(false),
         x: at(client, 0),
         y: at(client, 1),
+        width: 0,
     }
 }
 
