@@ -1,7 +1,7 @@
-use super::ipc::{niri_output, niri_shell, niri_watch, run};
+use super::ipc::{niri_output, niri_request, niri_shell, niri_watch, run};
 use super::{Compositor, Monitor, Window, Workspace};
 use anyhow::Result;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 pub struct Niri;
@@ -103,9 +103,18 @@ impl Compositor for Niri {
         ))
     }
 
+    /// By id: `niri msg action focus-workspace 4` means the fourth workspace, not id 4, and the two
+    /// part as soon as a workspace is moved.
     fn focus_workspace(&self, handle: &str) -> Result<()> {
+        if let Ok(id) = handle.parse::<u64>() {
+            let request = json!({ "Action": { "FocusWorkspace": { "reference": { "Id": id } } } });
+            if niri_request(&request).is_ok() {
+                return Ok(());
+            }
+        }
+        let reference = workspace_index(handle).unwrap_or_else(|| handle.to_string());
         run(&format!(
-            "{} msg action focus-workspace {handle}",
+            "{} msg action focus-workspace {reference}",
             niri_shell()
         ))
     }
@@ -181,6 +190,18 @@ fn workspace_name(workspace: &Value, id: i64) -> String {
                 .map(|idx| idx.to_string())
                 .unwrap_or_else(|| id.to_string())
         })
+}
+
+/// The current index of the workspace with this id, for the `niri msg` fallback.
+fn workspace_index(handle: &str) -> Option<String> {
+    let id = handle.parse::<i64>().ok()?;
+    json(&["msg", "--json", "workspaces"])?
+        .as_array()?
+        .iter()
+        .find(|workspace| workspace.get("id").and_then(Value::as_i64) == Some(id))?
+        .get("idx")
+        .and_then(Value::as_i64)
+        .map(|idx| idx.to_string())
 }
 
 fn workspace_names() -> HashMap<i64, String> {

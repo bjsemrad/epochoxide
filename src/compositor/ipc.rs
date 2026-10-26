@@ -184,6 +184,23 @@ pub fn niri_output(args: &[&str]) -> Option<String> {
     output(command)
 }
 
+/// One request over niri's socket. `niri msg` can only name a workspace by index or name (and a
+/// numeric name parses as an index), so anything that needs a workspace's id goes through here.
+pub fn niri_request(request: &serde_json::Value) -> Result<()> {
+    let socket = niri_socket().context("no niri socket")?;
+    let mut stream = UnixStream::connect(&socket).context("connecting to niri")?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    writeln!(stream, "{request}")?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply)?;
+    let reply: serde_json::Value = serde_json::from_str(&reply).context("niri's reply")?;
+    if reply.get("Ok").is_some() {
+        Ok(())
+    } else {
+        anyhow::bail!("niri refused the request: {reply}")
+    }
+}
+
 pub fn niri_shell() -> String {
     niri_socket()
         .map(|socket| format!("NIRI_SOCKET={} niri", shell_quote(&socket)))
