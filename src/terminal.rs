@@ -64,6 +64,7 @@ fn scoped(line: &str) -> Command {
 
 fn detached(command: &mut Command) -> &mut Command {
     command
+        .envs(crate::providers::session_env())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

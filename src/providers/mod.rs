@@ -325,10 +325,26 @@ pub fn copy_text(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// The display variables as the session has them now. This service often starts before the
+/// compositor exports them (niri only hands `DISPLAY` to what it spawns itself), so what it
+/// inherited can be missing or stale; an X11 app launched without `DISPLAY` dies at once.
+pub fn session_env() -> Vec<(String, String)> {
+    const KEYS: [&str; 3] = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"];
+    let Some(text) = command_output("systemctl", &["--user", "show-environment"]) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, value)| KEYS.contains(key) && !value.is_empty())
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
 pub fn run_shell(command: &str) -> Result<()> {
     let mut child = std::process::Command::new("sh")
         .arg("-c")
         .arg(command)
+        .envs(session_env())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
     let command = command.to_string();
